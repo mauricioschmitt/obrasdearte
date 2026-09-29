@@ -1,0 +1,7 @@
+numpy>=1.26
+scipy>=1.11
+rasterio>=1.3
+pyproj>=3.6
+shapely>=2.0
+# opcional: deixa o preenchimento de depressões ~20x mais rápido
+# richdem>=0.3
