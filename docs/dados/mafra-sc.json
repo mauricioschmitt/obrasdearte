@@ -1,0 +1,25 @@
+{
+ "id": "mafra-sc",
+ "nome": "Mafra - SC",
+ "lin": 637,
+ "col": 685,
+ "celula": 30,
+ "origem": [
+  609161.6894540318,
+  7118351.8645258965
+ ],
+ "proj4": "+proj=utm +zone=22 +south +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs",
+ "epsg": 31982,
+ "idf": {
+  "K": 1000,
+  "a": 0.15,
+  "b": 10,
+  "c": 0.75
+ },
+ "bin": "mafra-sc.bin.gz",
+ "fonte": {
+  "mde": "output_hh.tif",
+  "uso": "brazil_coverage-col11_2025.tif",
+  "gerado_em": "2026-09-29"
+ }
+}
