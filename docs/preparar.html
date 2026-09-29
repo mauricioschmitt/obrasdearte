@@ -117,12 +117,25 @@ Não precisa de QGIS, de Python nem de servidor, e nada sai do seu computador.</
 
 <div class="passo">
   <h2><em>2</em>Uso e cobertura do solo</h2>
-  <p>Recorte do MapBiomas da mesma área. Pode estar em outra resolução, outro recorte e outro CRS,
-  inclusive em graus: a página alinha sozinha sobre a grade do MDE.</p>
+  <p>Pode ser o GeoTIFF do <b>Brasil inteiro</b> do MapBiomas, sem recortar nada.
+  A página lê só a janela que cobre o seu MDE, então o tamanho do arquivo não importa.
+  Baixe uma vez e use para todas as regiões.</p>
   <div class="solta" id="solta-uso" tabindex="0" role="button">
-    <b>Solte o MapBiomas aqui</b><span>ou clique para escolher · .tif</span>
+    <b>Solte o MapBiomas aqui</b><span>ou clique para escolher · .tif, de qualquer tamanho</span>
   </div>
   <input type="file" id="arq-uso" accept=".tif,.tiff" hidden>
+  <div class="linha-ctrl">
+    <label style="flex-direction:row;align-items:center;gap:.4rem">
+      Legenda do arquivo
+      <select id="c-legenda">
+        <option value="mapbiomas" selected>MapBiomas</option>
+        <option value="worldcover">ESA WorldCover</option>
+      </select>
+    </label>
+  </div>
+  <p class="nota" style="margin-top:.5rem">A WorldCover é a alternativa quando o download
+  do MapBiomas emperrar: é global e baixa em dois cliques. Em compensação não separa pastagem
+  de campo natural nem enxerga silvicultura, então o CN fica mais grosseiro.</p>
 </div>
 
 <div class="passo">
@@ -169,16 +182,43 @@ Não precisa de QGIS, de Python nem de servidor, e nada sai do seu computador.</
 
 const DESL = [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
 
-const MAPA_MAPBIOMAS = {
-  1: [1,3,4,5,49],                              // Floresta
-  2: [9],                                       // Silvicultura
-  3: [10,11,12,23,29,32,50],                    // Campo natural
-  4: [15,21],                                   // Pastagem
-  5: [14,18,19,20,35,36,39,40,41,46,47,48,62],  // Agricultura
-  6: [22,25,30],                                // Solo exposto
-  7: [24],                                      // Área urbanizada
-  8: [26,31,33],                                // Corpo d'água
+/* Duas legendas aceitas. O MapBiomas é o melhor dado para o Brasil; a ESA
+   WorldCover é a alternativa quando o download do MapBiomas emperrar, porque
+   é global e baixa em dois cliques. A WorldCover não separa pastagem de campo
+   natural nem enxerga silvicultura, então o CN fica mais grosseiro. */
+const LEGENDAS = {
+  mapbiomas: {
+    nome: "MapBiomas",
+    mapa: {
+      1: [1,3,4,5,49],                              // Floresta
+      2: [9],                                       // Silvicultura
+      3: [10,11,12,23,29,32,50],                    // Campo natural
+      4: [15,21],                                   // Pastagem
+      5: [14,18,19,20,35,36,39,40,41,46,47,48,62],  // Agricultura
+      6: [22,25,30],                                // Solo exposto
+      7: [24],                                      // Área urbanizada
+      8: [26,31,33],                                // Corpo d'água
+    },
+    ignorar: [0,27,255],
+  },
+  worldcover: {
+    nome: "ESA WorldCover",
+    mapa: {
+      1: [10,95],       // árvores e mangue
+      2: [],
+      3: [20,90,100],   // arbustiva, várzea, musgo e líquen
+      4: [30],          // campo: em SC quase sempre pastagem
+      5: [40],          // agricultura
+      6: [60],          // solo exposto
+      7: [50],          // construído
+      8: [70,80],       // água e gelo
+    },
+    ignorar: [0,255],
+  },
 };
+
+const MAPA_MAPBIOMAS = LEGENDAS.mapbiomas.mapa;   // compatibilidade
+
 const CLASSE_PADRAO = 4;
 const NOMES_CLASSE = {1:"Floresta",2:"Silvicultura",3:"Campo natural",4:"Pastagem",
   5:"Agricultura",6:"Solo exposto",7:"Área urbanizada",8:"Corpo d'água"};
@@ -303,10 +343,12 @@ function zonaUTM(lon){ return Math.floor((lon+180)/6)+1; }
 function epsgUTMsul(zona){ return 31960+zona; }   // SIRGAS 2000 / UTM zona S
 
 /* --- 2. Tradução dos códigos do MapBiomas --------------------------------- */
-function remapearUso(bruto){
+function remapearUso(bruto, chaveLegenda='mapbiomas'){
+  const legenda = LEGENDAS[chaveLegenda] || LEGENDAS.mapbiomas;
   const tabela = new Uint8Array(256).fill(0);
-  for(const destino in MAPA_MAPBIOMAS)
-    for(const cod of MAPA_MAPBIOMAS[destino]) tabela[cod]=+destino;
+  for(const destino in legenda.mapa)
+    for(const cod of legenda.mapa[destino]) tabela[cod]=+destino;
+  const ignorar = new Set(legenda.ignorar);
 
   const saida = new Uint8Array(bruto.length);
   const naoMapeados = {};
@@ -316,7 +358,7 @@ function remapearUso(bruto){
     if(t) saida[k]=t;
     else{
       saida[k]=CLASSE_PADRAO;
-      if(c!==0 && c!==27 && c!==255) naoMapeados[c]=(naoMapeados[c]||0)+1;
+      if(!ignorar.has(c)) naoMapeados[c]=(naoMapeados[c]||0)+1;
     }
   }
   return {uso:saida, naoMapeados};
@@ -426,20 +468,58 @@ function log(texto, tipo){
 const respirar = () => new Promise(r => setTimeout(r, 16));
 const nBR = v => v.toLocaleString('pt-BR', {maximumFractionDigits:0});
 
-/* --- leitura de GeoTIFF --------------------------------------------------- */
-async function lerTIFF(arquivo){
-  const tif = await GeoTIFF.fromArrayBuffer(await arquivo.arrayBuffer());
+/* --- leitura de GeoTIFF ---------------------------------------------------
+   fromBlob lê o arquivo por pedaços, direto do disco, em vez de carregar tudo
+   na memória. É o que permite apontar para o GeoTIFF do Brasil inteiro sem
+   recortar nada antes: depois, só a janela que interessa é lida. */
+async function abrirTIFF(arquivo){
+  const tif = await GeoTIFF.fromBlob(arquivo);
   const img = await tif.getImage();
-  const [dados] = await img.readRasters();
   const [x0, y0] = img.getOrigin();
   const [rx, ry] = img.getResolution();
   const gk = img.getGeoKeys() || {};
   let semDado = null;
   try { semDado = img.getGDALNoData(); } catch(e){ /* sem tag de nodata */ }
-  return { dados, lin:img.getHeight(), col:img.getWidth(), x0, y0,
+  return { imagem:img, lin:img.getHeight(), col:img.getWidth(), x0, y0,
            celX:Math.abs(rx), celY:Math.abs(ry), cel:Math.abs(rx),
            epsg: gk.ProjectedCSTypeGeoKey || gk.GeographicTypeGeoKey || 0,
-           citacao: gk.GTCitationGeoKey || gk.GeogCitationGeoKey || '', semDado };
+           citacao: gk.GTCitationGeoKey || gk.GeogCitationGeoKey || '',
+           semDado, tiled: !!img.isTiled };
+}
+
+const LIMITE_MDE = 90e6;   // pixels que cabem confortavelmente na memória
+
+async function carregarPixels(info){
+  if(info.lin*info.col > LIMITE_MDE) throw new Error(
+    `Este MDE tem ${(info.lin*info.col/1e6).toFixed(0)} milhões de pixels, demais para `
+  + `carregar inteiro. Baixe um recorte menor do OpenTopography.`);
+  const [dados] = await info.imagem.readRasters();
+  info.dados = dados;
+  return info;
+}
+
+/* Lê apenas o retângulo do uso do solo que cobre a grade de saída, com uma
+   folga de algumas células. Num GeoTIFF do Brasil inteiro isso é a diferença
+   entre alguns megabytes e alguns gigabytes. */
+async function lerJanelaUso(uso, alvo, paraUso){
+  let umin=Infinity, vmin=Infinity, umax=-Infinity, vmax=-Infinity;
+  for(let a=0;a<=8;a++) for(let b=0;b<=8;b++){
+    const x = alvo.x0 + (b/8)*alvo.col*alvo.cel;
+    const y = alvo.y0 - (a/8)*alvo.lin*alvo.cel;
+    const [xo, yo] = paraUso(x, y);
+    const u = (xo-uso.x0)/uso.celX, v = (uso.y0-yo)/uso.celY;
+    umin=Math.min(umin,u); umax=Math.max(umax,u);
+    vmin=Math.min(vmin,v); vmax=Math.max(vmax,v);
+  }
+  const folga = 4;
+  const j0 = Math.max(0, Math.floor(umin)-folga), i0 = Math.max(0, Math.floor(vmin)-folga);
+  const j1 = Math.min(uso.col, Math.ceil(umax)+folga), i1 = Math.min(uso.lin, Math.ceil(vmax)+folga);
+  if(j1<=j0 || i1<=i0) throw new Error(
+    "O uso do solo não cobre a área do MDE. Confira se os dois são da mesma região.");
+  const [dados] = await uso.imagem.readRasters({window:[j0, i0, j1, i1]});
+  return { dados, lin:i1-i0, col:j1-j0,
+           x0: uso.x0 + j0*uso.celX, y0: uso.y0 - i0*uso.celY,
+           celX: uso.celX, celY: uso.celY };
 }
 
 /* --- áreas de soltar ------------------------------------------------------ */
@@ -455,12 +535,19 @@ function ligarSolta(idZona, idInput, chave, rotulo, aoCarregar){
     zona.innerHTML = `<b>Lendo ${arq.name}…</b><span>${(arq.size/1e6).toFixed(1)} MB</span>`;
     await respirar();
     try{
-      const info = await lerTIFF(arq);
+      let info = await abrirTIFF(arq);
+      if(chave === 'mde') info = await carregarPixels(info);
       st[chave] = info;
       st[chave === 'mde' ? 'arqMde' : 'arqUso'] = arq;
       zona.classList.add('pronto');
+      const gp = info.lin*info.col >= 1e8
+        ? ` · ${(info.lin*info.col/1e9).toFixed(1)} bilhões de pixels, lendo só a janela` : '';
       zona.innerHTML = `<b>${rotulo} carregado</b><span>${arq.name} · ${info.lin} × ${info.col}`
-                     + ` · EPSG:${info.epsg || '?'} · clique para trocar</span>`;
+                     + ` · EPSG:${info.epsg || '?'}${gp} · clique para trocar</span>`;
+      if(chave === 'uso' && !info.tiled && info.lin*info.col > 5e7)
+        zona.innerHTML += `<span style="color:var(--alerta);display:block;margin-top:.3rem">`
+          + `Este arquivo não é tiled, então ler uma janela dele será lento. `
+          + `Se demorar demais, use a ESA WorldCover.</span>`;
       if(aoCarregar) aoCarregar(info);
     }catch(err){
       zona.innerHTML = `<b style="color:var(--alerta)">Não consegui ler</b>
@@ -669,14 +756,18 @@ $('bt-processar').onclick = async () => {
       if(!d) throw new Error(`Não reconheço o EPSG:${uso.epsg} do uso do solo.`);
       paraUso = (x,y) => proj4(p4Alvo, d, [x,y]);
     }
-    const { uso:classes, naoMapeados } = remapearUso(alinharUso(alvo, uso, paraUso));
+    const janela = await lerJanelaUso(uso, alvo, paraUso);
+    log(`  janela lida: ${janela.lin} × ${janela.col} de ${uso.lin} × ${uso.col} pixels`);
+    const leg = $('c-legenda').value;
+    const { uso:classes, naoMapeados } = remapearUso(alinharUso(alvo, janela, paraUso), leg);
+    log(`  legenda: ${LEGENDAS[leg].nome}`);
 
     const pend = Object.entries(naoMapeados).map(([c,q]) => [c, q/n*100])
       .filter(([,p]) => p >= 0.05).sort((a,b) => b[1]-a[1]);
     if(pend.length){
-      log('  códigos do MapBiomas sem tradução (viraram pastagem):', 'atencao');
+      log('  códigos sem tradução (viraram pastagem):', 'atencao');
       for(const [c,p] of pend.slice(0,8)) log(`    código ${c}  ${p.toFixed(2)} % da área`, 'atencao');
-      log('  confira a legenda da coleção antes de usar em projeto', 'atencao');
+      log('  confira se a legenda escolhida é a certa para este arquivo', 'atencao');
     }else log('  todos os códigos reconhecidos', 'bom');
 
     const comp = {};
