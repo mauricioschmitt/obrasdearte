@@ -1,0 +1,9 @@
+Esta pasta recebe as regiões geradas pelo preparar_regiao.py.
+
+Enquanto estiver vazia, o index.html abre em modo demonstração, com
+relevo sintético. É seguro publicar assim.
+
+Depois de rodar o script, aparecem aqui:
+  manifesto.json   lista das regiões (o site lê este primeiro)
+  <id>.json        metadados de uma região
+  <id>.bin.gz      o raster compactado que o navegador baixa
