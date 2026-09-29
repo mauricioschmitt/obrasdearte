@@ -62,6 +62,15 @@ button.baixar{display:block;width:100%;text-align:left;font-family:var(--mono);f
   line-height:1.55;margin:.8rem 0}
 .nota{font-size:.78rem;color:var(--fraca);line-height:1.5}
 code{font-family:var(--mono);font-size:.92em}
+.palco{position:relative;display:inline-block;line-height:0;border:1px solid var(--linha);border-radius:2px}
+.palco canvas{display:block}
+.palco #mascara{position:absolute;inset:0;cursor:crosshair;touch-action:none}
+.linha-ctrl{display:flex;gap:1rem;align-items:center;flex-wrap:wrap;margin-top:.7rem}
+button.secundaria{font-family:var(--sans);font-size:.8rem;background:transparent;color:var(--agua);
+  border:1px solid var(--agua);border-radius:2px;padding:.35rem .7rem;cursor:pointer}
+.resumo{margin-top:.7rem;font-family:var(--mono);font-size:.82rem;line-height:1.6;color:var(--fraca)}
+.resumo b{color:var(--tinta);font-weight:500}
+.resumo .atencao{color:var(--curva)} .resumo .erro{color:var(--alerta)}
 </style>
 </head>
 <body>
@@ -71,26 +80,45 @@ code{font-family:var(--mono);font-size:.92em}
 </header>
 <div class="folha">
 
-<p class="intro">Arraste o modelo de elevação e o mapa de uso do solo. Esta página faz
-todo o processamento aqui mesmo, no seu navegador: alinha os dois rasters, traduz as classes
-do MapBiomas, preenche as depressões do terreno e calcula a direção de fluxo. No fim você
-baixa três arquivos e sobe no GitHub, dentro de <code>docs/dados/</code>.
-Nada é enviado para lugar nenhum.</p>
+<p class="intro">Arraste o modelo de elevação e o mapa de uso do solo. Esta página faz todo o
+processamento aqui mesmo, no seu navegador: reprojeta, recorta, alinha os dois rasters, traduz
+as classes do MapBiomas, preenche as depressões do terreno e calcula a direção de fluxo. No fim
+você baixa três arquivos e sobe no GitHub, em <code>docs/dados/</code>.
+Não precisa de QGIS, de Python nem de servidor, e nada sai do seu computador.</p>
 
 <div class="passo">
   <h2><em>1</em>Modelo de elevação</h2>
-  <p>GeoTIFF em CRS projetado em metros. Em Santa Catarina, SIRGAS 2000 / UTM 22S
-  (EPSG:31982). Se o seu estiver em graus, exporte do QGIS com "Salvar como" escolhendo esse CRS.</p>
+  <p>GeoTIFF de qualquer fonte. Pode estar em graus: a página reprojeta sozinha
+  para UTM, detectando a zona pela longitude. Não precisa passar pelo QGIS.</p>
   <div class="solta" id="solta-mde" tabindex="0" role="button">
     <b>Solte o MDE aqui</b><span>ou clique para escolher · .tif</span>
   </div>
   <input type="file" id="arq-mde" accept=".tif,.tiff" hidden>
+
+  <div id="caixa-previa" hidden style="margin-top:1rem">
+    <p style="margin:0 0 .5rem">Arraste sobre o relevo para recortar a região.
+    Recorte seguindo divisores de água e generoso a montante: bacia cortada
+    entrega área menor que a real, sem avisar.</p>
+    <div class="palco">
+      <canvas id="previa"></canvas>
+      <canvas id="mascara"></canvas>
+    </div>
+    <div class="linha-ctrl">
+      <button class="secundaria" id="bt-tudo">Usar a área inteira</button>
+      <label style="flex-direction:row;align-items:center;gap:.4rem">
+        Resolução <input id="c-celula" type="number" value="30" min="5" step="5"
+          style="width:5rem"> m
+      </label>
+    </div>
+    <div id="resumo" class="resumo"></div>
+    <div id="aviso-crs" class="aviso" hidden></div>
+  </div>
 </div>
 
 <div class="passo">
   <h2><em>2</em>Uso e cobertura do solo</h2>
-  <p>Recorte do MapBiomas da mesma área. Pode estar em outra resolução, outro recorte e
-  outro CRS: a página alinha sozinha sobre a grade do MDE.</p>
+  <p>Recorte do MapBiomas da mesma área. Pode estar em outra resolução, outro recorte e outro CRS,
+  inclusive em graus: a página alinha sozinha sobre a grade do MDE.</p>
   <div class="solta" id="solta-uso" tabindex="0" role="button">
     <b>Solte o MapBiomas aqui</b><span>ou clique para escolher · .tif</span>
   </div>
@@ -205,45 +233,74 @@ class Monte {
   }
 }
 
-/* --- 1. Alinhamento do uso do solo sobre a grade do MDE -------------------
-   Os dois rasters quase nunca vêm na mesma grade: o MapBiomas costuma vir em
-   coordenadas geográficas e o MDE em UTM. Em vez de reprojetar célula a
-   célula (milhões de chamadas), converte-se uma malha grossa e interpola-se
-   o resto. O erro fica muito abaixo de um pixel. */
-function alinharUso(mdeInfo, usoInfo, transformar, passo=16){
-  const {lin, col, x0, y0, cel} = mdeInfo;
-  const saida = new Int32Array(lin*col);
+/* --- 1. Malha de reamostragem ---------------------------------------------
+   Converter cada célula de um raster para o sistema de outro custa milhões de
+   chamadas de projeção e trava a aba. Como a transformação é suave, converte-se
+   uma malha grossa e interpola-se o resto. O erro fica muito abaixo de um pixel.
 
-  const nl = Math.ceil(lin/passo)+1, nc = Math.ceil(col/passo)+1;
-  const malhaU = new Float64Array(nl*nc), malhaV = new Float64Array(nl*nc);
-
+   Devolve, para cada nó da malha, a posição em pixels no raster de origem. */
+function malhaGrossa(alvo, origem, transformar, passo){
+  const nl=Math.ceil(alvo.lin/passo)+1, nc=Math.ceil(alvo.col/passo)+1;
+  const U=new Float64Array(nl*nc), V=new Float64Array(nl*nc);
   for(let a=0;a<nl;a++) for(let b=0;b<nc;b++){
-    // Os nós da última linha e coluna caem fora do raster de propósito: a
+    // Nós da última linha e coluna caem fora do raster de propósito: a
     // transformação vale fora dos limites, e truncá-los deformaria o
     // espaçamento da malha e deslocaria a interpolação perto da borda.
-    const i=a*passo, j=b*passo;
-    const x=x0+(j+0.5)*cel, y=y0-(i+0.5)*cel;
-    const [xu,yu]=transformar(x,y);
-    malhaU[a*nc+b]=(xu-usoInfo.x0)/usoInfo.celX;
-    malhaV[a*nc+b]=(usoInfo.y0-yu)/usoInfo.celY;
+    const x=alvo.x0+(b*passo+0.5)*alvo.cel, y=alvo.y0-(a*passo+0.5)*alvo.cel;
+    const [xo,yo]=transformar(x,y);
+    U[a*nc+b]=(xo-origem.x0)/origem.celX;
+    V[a*nc+b]=(origem.y0-yo)/origem.celY;
   }
+  return {U,V,nl,nc};
+}
 
-  for(let i=0;i<lin;i++){
-    const a=Math.min((i/passo)|0, nl-2), fi=(i-a*passo)/passo;
-    for(let j=0;j<col;j++){
-      const b=Math.min((j/passo)|0, nc-2), fj=(j-b*passo)/passo;
-      const q=a*nc+b;
-      const u = malhaU[q]*(1-fi)*(1-fj) + malhaU[q+1]*(1-fi)*fj
-              + malhaU[q+nc]*fi*(1-fj)  + malhaU[q+nc+1]*fi*fj;
-      const v = malhaV[q]*(1-fi)*(1-fj) + malhaV[q+1]*(1-fi)*fj
-              + malhaV[q+nc]*fi*(1-fj)  + malhaV[q+nc+1]*fi*fj;
-      const uu=Math.round(u-0.5), vv=Math.round(v-0.5);
-      saida[i*col+j] = (uu>=0 && vv>=0 && uu<usoInfo.col && vv<usoInfo.lin)
-        ? usoInfo.dados[vv*usoInfo.col+uu] : 0;
-    }
+/* Interpola a posição de uma célula do alvo dentro da malha grossa. */
+function posicaoNaOrigem(m, i, j, passo){
+  const a=Math.min((i/passo)|0, m.nl-2), fi=(i-a*passo)/passo;
+  const b=Math.min((j/passo)|0, m.nc-2), fj=(j-b*passo)/passo;
+  const q=a*m.nc+b, p=(1-fi)*(1-fj), r=(1-fi)*fj, s=fi*(1-fj), t=fi*fj;
+  return [ m.U[q]*p + m.U[q+1]*r + m.U[q+m.nc]*s + m.U[q+m.nc+1]*t,
+           m.V[q]*p + m.V[q+1]*r + m.V[q+m.nc]*s + m.V[q+m.nc+1]*t ];
+}
+
+/* --- 2. Reprojeção e recorte do MDE ---------------------------------------
+   Aceita o MDE como veio, inclusive em graus, e entrega a grade métrica que o
+   portal precisa. Interpolação bilinear, porque elevação é contínua. */
+function reamostrarMDE(origem, alvo, transformar, semDado, passo=16){
+  const {lin,col}=alvo, saida=new Float32Array(lin*col);
+  const m=malhaGrossa(alvo, origem, transformar, passo);
+  const invalido = z => !isFinite(z) || z<=-1e4 || (semDado!==null && z===semDado);
+
+  for(let i=0;i<lin;i++) for(let j=0;j<col;j++){
+    const [u,v]=posicaoNaOrigem(m,i,j,passo);
+    const u0=Math.floor(u-0.5), v0=Math.floor(v-0.5);
+    if(u0<0 || v0<0 || u0+1>=origem.col || v0+1>=origem.lin){ saida[i*col+j]=NaN; continue; }
+    const fu=(u-0.5)-u0, fv=(v-0.5)-v0;
+    const a=origem.dados[v0*origem.col+u0],       b=origem.dados[v0*origem.col+u0+1];
+    const c=origem.dados[(v0+1)*origem.col+u0],   d=origem.dados[(v0+1)*origem.col+u0+1];
+    if(invalido(a)||invalido(b)||invalido(c)||invalido(d)){ saida[i*col+j]=NaN; continue; }
+    saida[i*col+j] = a*(1-fu)*(1-fv) + b*fu*(1-fv) + c*(1-fu)*fv + d*fu*fv;
   }
   return saida;
 }
+
+/* --- 3. Alinhamento do uso do solo sobre a grade do MDE -------------------
+   Vizinho mais próximo: classe temática nunca pode ser interpolada. */
+function alinharUso(alvo, origem, transformar, passo=16){
+  const {lin,col}=alvo, saida=new Int32Array(lin*col);
+  const m=malhaGrossa(alvo, origem, transformar, passo);
+  for(let i=0;i<lin;i++) for(let j=0;j<col;j++){
+    const [u,v]=posicaoNaOrigem(m,i,j,passo);
+    const uu=Math.round(u-0.5), vv=Math.round(v-0.5);
+    saida[i*col+j] = (uu>=0 && vv>=0 && uu<origem.col && vv<origem.lin)
+      ? origem.dados[vv*origem.col+uu] : 0;
+  }
+  return saida;
+}
+
+/* --- Zona UTM a partir da longitude --------------------------------------- */
+function zonaUTM(lon){ return Math.floor((lon+180)/6)+1; }
+function epsgUTMsul(zona){ return 31960+zona; }   // SIRGAS 2000 / UTM zona S
 
 /* --- 2. Tradução dos códigos do MapBiomas --------------------------------- */
 function remapearUso(bruto){
@@ -354,47 +411,20 @@ async function comprimir(u8){
    INTERFACE DA PÁGINA DE PREPARO
    =========================================================================== */
 const $ = id => document.getElementById(id);
-const arquivos = { mde:null, uso:null };
+const st = { mde:null, uso:null, arqMde:null, arqUso:null,
+             rect:null, alvo:null, p4Alvo:null, epsgAlvo:0 };
 
-/* --- registro de progresso na tela ---------------------------------------- */
 const reg = $('registro');
 function log(texto, tipo){
   reg.hidden = false;
-  const linha = document.createElement('div');
-  if(tipo) linha.className = tipo;
-  linha.textContent = texto;
-  reg.appendChild(linha);
+  const l = document.createElement('div');
+  if(tipo) l.className = tipo;
+  l.textContent = texto;
+  reg.appendChild(l);
   reg.scrollTop = reg.scrollHeight;
 }
 const respirar = () => new Promise(r => setTimeout(r, 16));
-
-/* --- áreas de soltar ------------------------------------------------------ */
-function ligarSolta(idZona, idInput, chave, rotulo){
-  const zona = $(idZona), campo = $(idInput);
-  const aceitar = arq => {
-    if(!arq) return;
-    if(!/\.tiff?$/i.test(arq.name)){
-      log(`"${arq.name}" não é um GeoTIFF. Esperado .tif`, 'erro');
-      return;
-    }
-    arquivos[chave] = arq;
-    zona.classList.add('pronto');
-    zona.innerHTML = `<b>${rotulo} carregado</b><span>${arq.name} · `
-                   + `${(arq.size/1e6).toFixed(1)} MB · clique para trocar</span>`;
-    $('bt-processar').disabled = !(arquivos.mde && arquivos.uso);
-  };
-  zona.onclick = () => campo.click();
-  zona.onkeydown = ev => { if(ev.key==='Enter'||ev.key===' '){ ev.preventDefault(); campo.click(); } };
-  campo.onchange = () => aceitar(campo.files[0]);
-  zona.ondragover = ev => { ev.preventDefault(); zona.classList.add('sobre'); };
-  zona.ondragleave = () => zona.classList.remove('sobre');
-  zona.ondrop = ev => {
-    ev.preventDefault(); zona.classList.remove('sobre');
-    aceitar(ev.dataTransfer.files[0]);
-  };
-}
-ligarSolta('solta-mde','arq-mde','mde','MDE');
-ligarSolta('solta-uso','arq-uso','uso','MapBiomas');
+const nBR = v => v.toLocaleString('pt-BR', {maximumFractionDigits:0});
 
 /* --- leitura de GeoTIFF --------------------------------------------------- */
 async function lerTIFF(arquivo){
@@ -403,185 +433,324 @@ async function lerTIFF(arquivo){
   const [dados] = await img.readRasters();
   const [x0, y0] = img.getOrigin();
   const [rx, ry] = img.getResolution();
-  const chaves = img.getGeoKeys() || {};
+  const gk = img.getGeoKeys() || {};
   let semDado = null;
   try { semDado = img.getGDALNoData(); } catch(e){ /* sem tag de nodata */ }
   return { dados, lin:img.getHeight(), col:img.getWidth(), x0, y0,
            celX:Math.abs(rx), celY:Math.abs(ry), cel:Math.abs(rx),
-           epsg: chaves.ProjectedCSTypeGeoKey || chaves.GeographicTypeGeoKey || 0,
-           citacao: chaves.GTCitationGeoKey || chaves.GeogCitationGeoKey || '',
-           semDado };
+           epsg: gk.ProjectedCSTypeGeoKey || gk.GeographicTypeGeoKey || 0,
+           citacao: gk.GTCitationGeoKey || gk.GeogCitationGeoKey || '', semDado };
 }
 
-/* Converte do CRS do MDE para o CRS do uso do solo. Identidade quando são o
-   mesmo, o que é o caso comum. */
-function fazerTransformador(mde, uso, proj4Mde){
-  if(uso.epsg === mde.epsg || !uso.epsg) return (x,y) => [x,y];
-  let destino;
-  if(ehGeografico(uso.epsg)) destino = 'EPSG:4326';
-  else {
-    destino = proj4De(uso.epsg);
-    if(!destino) throw new Error(
-      `Não reconheço o EPSG:${uso.epsg} do uso do solo. Reprojete-o para o mesmo CRS do MDE no QGIS.`);
+/* --- áreas de soltar ------------------------------------------------------ */
+function ligarSolta(idZona, idInput, chave, rotulo, aoCarregar){
+  const zona = $(idZona), campo = $(idInput);
+  const aceitar = async arq => {
+    if(!arq) return;
+    if(!/\.tiff?$/i.test(arq.name)){
+      zona.innerHTML = `<b style="color:var(--alerta)">Não é um GeoTIFF</b>
+        <span>"${arq.name}" — esperado .tif</span>`;
+      return;
+    }
+    zona.innerHTML = `<b>Lendo ${arq.name}…</b><span>${(arq.size/1e6).toFixed(1)} MB</span>`;
+    await respirar();
+    try{
+      const info = await lerTIFF(arq);
+      st[chave] = info;
+      st[chave === 'mde' ? 'arqMde' : 'arqUso'] = arq;
+      zona.classList.add('pronto');
+      zona.innerHTML = `<b>${rotulo} carregado</b><span>${arq.name} · ${info.lin} × ${info.col}`
+                     + ` · EPSG:${info.epsg || '?'} · clique para trocar</span>`;
+      if(aoCarregar) aoCarregar(info);
+    }catch(err){
+      zona.innerHTML = `<b style="color:var(--alerta)">Não consegui ler</b>
+        <span>${err.message || err}</span>`;
+    }
+    atualizarBotao();
+  };
+  zona.onclick = () => campo.click();
+  zona.onkeydown = ev => { if(ev.key === 'Enter' || ev.key === ' '){ ev.preventDefault(); campo.click(); } };
+  campo.onchange = () => aceitar(campo.files[0]);
+  zona.ondragover = ev => { ev.preventDefault(); zona.classList.add('sobre'); };
+  zona.ondragleave = () => zona.classList.remove('sobre');
+  zona.ondrop = ev => { ev.preventDefault(); zona.classList.remove('sobre'); aceitar(ev.dataTransfer.files[0]); };
+}
+const atualizarBotao = () => { $('bt-processar').disabled = !(st.mde && st.uso && st.alvo); };
+
+/* --- prévia do relevo com recorte por arrasto ----------------------------- */
+const MAX_PREV = 460;
+let prev = { esc:1, larg:0, alt:0 };
+
+function desenharPrevia(){
+  const m = st.mde, tela = $('previa');
+  const esc = Math.min(MAX_PREV/m.col, MAX_PREV/m.lin, 1);
+  const larg = Math.max(1, Math.round(m.col*esc)), alt = Math.max(1, Math.round(m.lin*esc));
+  prev = { esc, larg, alt };
+  tela.width = larg; tela.height = alt;
+  tela.style.width = larg+'px'; tela.style.height = alt+'px';
+
+  const ctx = tela.getContext('2d');
+  const img = ctx.createImageData(larg, alt), d = img.data;
+  const sd = m.semDado;
+  const val = z => isFinite(z) && z > -1e4 && (sd === null || z !== sd);
+
+  let zmin = Infinity, zmax = -Infinity;
+  for(let k=0;k<m.dados.length;k+=7){
+    const z = m.dados[k];
+    if(val(z)){ if(z<zmin) zmin=z; if(z>zmax) zmax=z; }
   }
-  if(ehGeografico(uso.epsg) && uso.epsg !== 4326)
-    log(`  o uso do solo está em EPSG:${uso.epsg}; tratando como WGS84 `
-      + `(diferença abaixo de 1 m, irrelevante aqui)`, 'atencao');
-  return (x,y) => proj4(proj4Mde, destino, [x,y]);
+  const amp = Math.max(1, zmax-zmin);
+  const passoM = m.celX/esc;   // distância no terreno entre pixels da prévia
+
+  for(let a=0;a<alt;a++) for(let b=0;b<larg;b++){
+    const i = Math.min(m.lin-1, (a/esc)|0), j = Math.min(m.col-1, (b/esc)|0), o = (a*larg+b)*4;
+    const z = m.dados[i*m.col+j];
+    if(!val(z)){ d[o]=d[o+1]=d[o+2]=205; d[o+3]=255; continue; }
+    const i0=Math.max(0,i-1), i1=Math.min(m.lin-1,i+1);
+    const j0=Math.max(0,j-1), j1=Math.min(m.col-1,j+1);
+    const gy = (m.dados[i1*m.col+j]-m.dados[i0*m.col+j])/passoM;
+    const gx = (m.dados[i*m.col+j1]-m.dados[i*m.col+j0])/passoM;
+    let s = (0.7071*(-gx*0.7071+gy*0.7071)+0.7071)/Math.sqrt(gx*gx+gy*gy+1);
+    s = Math.max(0.15, Math.min(1, s*1.15));
+    const t = (z-zmin)/amp;
+    d[o]   = (206-70*t)*s*0.85+40;
+    d[o+1] = (214-58*t)*s*0.85+46;
+    d[o+2] = (196-84*t)*s*0.85+40;
+    d[o+3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  $('caixa-previa').hidden = false;
+  desenharRect();
 }
 
-/* --- orquestração --------------------------------------------------------- */
+function desenharRect(){
+  const tela = $('mascara'), r = st.rect;
+  tela.width = prev.larg; tela.height = prev.alt;
+  tela.style.width = prev.larg+'px'; tela.style.height = prev.alt+'px';
+  const ctx = tela.getContext('2d');
+  ctx.clearRect(0, 0, prev.larg, prev.alt);
+  if(!r) return;
+  const x = r.j0*prev.esc, y = r.i0*prev.esc;
+  const w = (r.j1-r.j0)*prev.esc, h = (r.i1-r.i0)*prev.esc;
+  ctx.fillStyle = 'rgba(18,38,43,.45)';
+  ctx.fillRect(0, 0, prev.larg, prev.alt);
+  ctx.clearRect(x, y, w, h);
+  ctx.strokeStyle = '#1F6E8C'; ctx.lineWidth = 2;
+  ctx.strokeRect(x, y, w, h);
+}
+
+function ligarArrasto(){
+  const tela = $('mascara');
+  let inicio = null;
+  const pos = ev => {
+    const b = tela.getBoundingClientRect();
+    return [ Math.max(0, Math.min(st.mde.lin, (ev.clientY-b.top)/prev.esc)),
+             Math.max(0, Math.min(st.mde.col, (ev.clientX-b.left)/prev.esc)) ];
+  };
+  tela.onpointerdown = ev => { tela.setPointerCapture(ev.pointerId); inicio = pos(ev); };
+  tela.onpointermove = ev => {
+    if(!inicio) return;
+    const [i, j] = pos(ev);
+    st.rect = { i0:Math.round(Math.min(inicio[0],i)), i1:Math.round(Math.max(inicio[0],i)),
+                j0:Math.round(Math.min(inicio[1],j)), j1:Math.round(Math.max(inicio[1],j)) };
+    desenharRect(); definirAlvo();
+  };
+  tela.onpointerup = () => { inicio = null; };
+}
+
+$('bt-tudo').onclick = () => {
+  st.rect = { i0:0, j0:0, i1:st.mde.lin, j1:st.mde.col };
+  desenharRect(); definirAlvo();
+};
+
+/* --- grade de saída ------------------------------------------------------- */
+function definirAlvo(){
+  const m = st.mde, r = st.rect, cel = Math.max(5, +$('c-celula').value || 30);
+  const aviso = $('aviso-crs');
+  aviso.hidden = true;
+
+  if((r.i1-r.i0) < 10 || (r.j1-r.j0) < 10){
+    st.alvo = null; $('resumo').textContent = ''; atualizarBotao(); return;
+  }
+
+  // CRS de saída: o do próprio MDE, se já for métrico; senão UTM pelo centro
+  try{
+    if(m.epsg && !ehGeografico(m.epsg)){
+      st.p4Alvo = proj4De(m.epsg);
+      st.epsgAlvo = m.epsg;
+      if(!st.p4Alvo) throw new Error(
+        `Não reconheço o EPSG:${m.epsg} do MDE. Reprojete para EPSG:31982 antes.`);
+    }else{
+      const lonC = m.x0 + ((r.j0+r.j1)/2)*m.celX;
+      const zona = zonaUTM(lonC);
+      st.epsgAlvo = epsgUTMsul(zona);
+      st.p4Alvo = proj4De(st.epsgAlvo);
+      aviso.hidden = false;
+      aviso.textContent = `O MDE está em graus, então vou reprojetar para SIRGAS 2000 / `
+        + `UTM ${zona}S (EPSG:${st.epsgAlvo}), detectada pela longitude do recorte. `
+        + `Sem isso, área e declividade sairiam erradas.`;
+    }
+  }catch(err){
+    st.alvo = null; aviso.hidden = false; aviso.textContent = err.message;
+    $('resumo').textContent = ''; atualizarBotao(); return;
+  }
+
+  const paraAlvo = ehGeografico(m.epsg)
+    ? (x,y) => proj4('EPSG:4326', st.p4Alvo, [x,y])
+    : (x,y) => [x,y];
+
+  // extensão em metros, amostrando a borda do recorte, porque a projeção encurva
+  let xmin = Infinity, ymin = Infinity, xmax = -Infinity, ymax = -Infinity;
+  for(let a=0;a<=8;a++) for(let b=0;b<=8;b++){
+    const x = m.x0 + (r.j0 + (b/8)*(r.j1-r.j0))*m.celX;
+    const y = m.y0 - (r.i0 + (a/8)*(r.i1-r.i0))*m.celY;
+    const [px, py] = paraAlvo(x, y);
+    xmin = Math.min(xmin, px); xmax = Math.max(xmax, px);
+    ymin = Math.min(ymin, py); ymax = Math.max(ymax, py);
+  }
+
+  const col = Math.round((xmax-xmin)/cel), lin = Math.round((ymax-ymin)/cel);
+  st.alvo = { x0:xmin, y0:ymax, cel, lin, col };
+
+  const n = lin*col, km2 = n*cel*cel/1e6, mb = n*1.4/1e6;
+  const cor = n > 12e6 ? 'erro' : (n > 5e6 ? 'atencao' : '');
+  $('resumo').innerHTML =
+      `<b>${nBR(km2)} km²</b> · ${lin} × ${col} células de ${cel} m · ${nBR(n)} células<br>`
+    + `<span class="${cor}">download estimado: ${mb.toFixed(1)} MB`
+    + (n > 12e6 ? ' — grande demais, recorte menor'
+       : n > 5e6 ? ' — pesado para prefeitura pequena' : '')
+    + '</span>';
+  atualizarBotao();
+}
+$('c-celula').oninput = () => { if(st.rect) definirAlvo(); };
+
+ligarSolta('solta-mde', 'arq-mde', 'mde', 'MDE', info => {
+  st.rect = { i0:0, j0:0, i1:info.lin, j1:info.col };
+  desenharPrevia(); ligarArrasto(); definirAlvo();
+});
+ligarSolta('solta-uso', 'arq-uso', 'uso', 'MapBiomas');
+
+/* --- processamento -------------------------------------------------------- */
 $('bt-processar').onclick = async () => {
   const botao = $('bt-processar');
-  botao.disabled = true;
-  reg.innerHTML = '';
-  $('saidas').hidden = true;
-  const inicio = Date.now();
+  botao.disabled = true; reg.innerHTML = ''; $('saidas').hidden = true;
+  const t0 = Date.now();
 
   try{
-    const id = $('c-id').value.trim().toLowerCase().replace(/[^a-z0-9-]/g,'-');
+    const id = $('c-id').value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
     if(!id) throw new Error("Preencha o identificador da região.");
     const nome = $('c-nome').value.trim() || id;
+    const { mde, uso, alvo, p4Alvo } = st;
+    const n = alvo.lin*alvo.col;
+    if(n > 12e6) throw new Error(`${nBR(n)} células é demais para o navegador. Recorte menor.`);
 
-    log('lendo o modelo de elevação…');
+    log(`grade de saída: ${alvo.lin} × ${alvo.col} de ${alvo.cel} m · EPSG:${st.epsgAlvo}`);
+    if(ehGeografico(mde.epsg)) log('  reprojetando o MDE de graus para metros…');
     await respirar();
-    const mde = await lerTIFF(arquivos.mde);
-    log(`  ${mde.lin} × ${mde.col} células · ${mde.cel.toFixed(1)} m · `
-      + `EPSG:${mde.epsg}${mde.citacao?' ('+mde.citacao+')':''}`);
 
-    if(!mde.epsg) throw new Error(
-      "O MDE não traz informação de CRS. Reexporte pelo QGIS em EPSG:31982.");
-    if(ehGeografico(mde.epsg)) throw new Error(
-      `O MDE está em coordenadas geográficas (EPSG:${mde.epsg}). Área e declividade `
-    + `sairiam erradas. No QGIS, Camada → Salvar como, e escolha EPSG:31982.`);
-    const proj4Mde = proj4De(mde.epsg);
-    if(!proj4Mde) throw new Error(
-      `Não reconheço o EPSG:${mde.epsg}. Reprojete o MDE para EPSG:31982 (UTM 22S) no QGIS.`);
-    if(Math.abs(mde.celX - mde.celY) > 1e-6) throw new Error(
-      "As células do MDE não são quadradas. Reamostre no QGIS antes.");
+    const paraOrigem = ehGeografico(mde.epsg)
+      ? (x,y) => proj4(p4Alvo, 'EPSG:4326', [x,y]) : (x,y) => [x,y];
+    const z = reamostrarMDE(mde, alvo, paraOrigem, mde.semDado);
 
-    const n = mde.lin * mde.col;
-    const areaKm2 = n * mde.cel * mde.cel / 1e6;
-    log(`  recorte de ${areaKm2.toLocaleString('pt-BR',{maximumFractionDigits:0})} km²`);
-    if(n > 12e6) throw new Error(
-      `${n.toLocaleString('pt-BR')} células é grande demais para o navegador. `
-    + `Recorte em pedaços menores ou reamostre para 30 m.`);
-    if(n > 5e6) log('  recorte grande: o processamento pode levar um minuto', 'atencao');
+    const mascara = new Uint8Array(n);
+    let validas = 0;
+    for(let k=0;k<n;k++) if(isFinite(z[k])){ mascara[k]=1; validas++; }
+    if(!validas) throw new Error("O recorte caiu fora do MDE. Redesenhe o retângulo.");
+    if(validas < n) log(`  ${(100-validas/n*100).toFixed(1)} % do recorte é sem dado`,
+                        validas/n < 0.5 ? 'atencao' : null);
 
-    log('lendo o uso do solo…');
+    log('alinhando o uso do solo…');
     await respirar();
-    const uso = await lerTIFF(arquivos.uso);
-    log(`  ${uso.lin} × ${uso.col} células · EPSG:${uso.epsg}`);
-
-    log('alinhando o uso do solo sobre a grade do MDE…');
-    await respirar();
-    const bruto = alinharUso(mde, uso, fazerTransformador(mde, uso, proj4Mde));
-    const { uso:classes, naoMapeados } = remapearUso(bruto);
-
-    const pendentes = Object.entries(naoMapeados)
-      .map(([c,q]) => [c, q/n*100]).filter(([,p]) => p >= 0.05)
-      .sort((a,b) => b[1]-a[1]);
-    if(pendentes.length){
-      log('  códigos do MapBiomas sem tradução (viraram pastagem):', 'atencao');
-      for(const [c,p] of pendentes.slice(0,8))
-        log(`    código ${c}  ${p.toFixed(2)} % da área`, 'atencao');
-      log('  confira a legenda da coleção que você baixou antes de usar em projeto', 'atencao');
-    }else{
-      log('  todos os códigos reconhecidos', 'bom');
+    let paraUso;
+    if(uso.epsg === st.epsgAlvo || !uso.epsg) paraUso = (x,y) => [x,y];
+    else if(ehGeografico(uso.epsg)) paraUso = (x,y) => proj4(p4Alvo, 'EPSG:4326', [x,y]);
+    else{
+      const d = proj4De(uso.epsg);
+      if(!d) throw new Error(`Não reconheço o EPSG:${uso.epsg} do uso do solo.`);
+      paraUso = (x,y) => proj4(p4Alvo, d, [x,y]);
     }
+    const { uso:classes, naoMapeados } = remapearUso(alinharUso(alvo, uso, paraUso));
 
-    const composicao = {};
-    for(let k=0;k<n;k++) composicao[classes[k]] = (composicao[classes[k]]||0)+1;
+    const pend = Object.entries(naoMapeados).map(([c,q]) => [c, q/n*100])
+      .filter(([,p]) => p >= 0.05).sort((a,b) => b[1]-a[1]);
+    if(pend.length){
+      log('  códigos do MapBiomas sem tradução (viraram pastagem):', 'atencao');
+      for(const [c,p] of pend.slice(0,8)) log(`    código ${c}  ${p.toFixed(2)} % da área`, 'atencao');
+      log('  confira a legenda da coleção antes de usar em projeto', 'atencao');
+    }else log('  todos os códigos reconhecidos', 'bom');
+
+    const comp = {};
+    for(let k=0;k<n;k++) comp[classes[k]] = (comp[classes[k]] || 0) + 1;
 
     log('preenchendo depressões do terreno…');
     await respirar();
-    const mascara = new Uint8Array(n);
-    const sd = mde.semDado;
-    for(let k=0;k<n;k++){
-      const z = mde.dados[k];
-      mascara[k] = (isFinite(z) && (sd===null || z!==sd) && z > -1e4) ? 1 : 0;
-    }
-    let validas = 0; for(let k=0;k<n;k++) validas += mascara[k];
-    if(validas === 0) throw new Error("O MDE está todo vazio. Confira o recorte e o valor de nodata.");
-    if(validas < n) log(`  ${(100-validas/n*100).toFixed(1)} % do recorte é sem dado`);
-
-    let ultimo = -1;
-    const cheio = await preencherDepressoes(mde.dados, mascara, mde.lin, mde.col, 1e-4, f => {
-      const pct = Math.min(99, Math.round(f*100));
-      if(pct >= ultimo + 20){ ultimo = pct; log(`  ${pct} %`); }
+    let ult = -1;
+    const cheio = await preencherDepressoes(z, mascara, alvo.lin, alvo.col, 1e-4, f => {
+      const p = Math.min(99, Math.round(f*100));
+      if(p >= ult+20){ ult = p; log(`  ${p} %`); }
     });
 
     log('calculando a direção de fluxo D8…');
     await respirar();
-    const d8 = direcaoD8(cheio, mascara, mde.lin, mde.col, mde.cel);
+    const d8 = direcaoD8(cheio, mascara, alvo.lin, alvo.col, alvo.cel);
 
     log('comprimindo…');
     await respirar();
-    const binario = await comprimir(montarBinario(cheio, d8, classes, n));
+    const bin = await comprimir(montarBinario(cheio, d8, classes, n));
 
-    const meta = {
-      id, nome, lin:mde.lin, col:mde.col, celula:mde.cel,
-      origem:[mde.x0, mde.y0], proj4:proj4Mde, epsg:mde.epsg,
+    const meta = { id, nome, lin:alvo.lin, col:alvo.col, celula:alvo.cel,
+      origem:[alvo.x0, alvo.y0], proj4:p4Alvo, epsg:st.epsgAlvo,
       idf:{ K:+$('c-K').value, a:+$('c-a').value, b:+$('c-b').value, c:+$('c-c').value },
       bin:`${id}.bin.gz`,
-      fonte:{ mde:arquivos.mde.name, uso:arquivos.uso.name,
-              gerado_em:new Date().toISOString().slice(0,10) },
-    };
+      fonte:{ mde:st.arqMde.name, uso:st.arqUso.name,
+              gerado_em:new Date().toISOString().slice(0,10) } };
 
-    /* Busca o manifesto que já está publicado, para não apagar as regiões
-       que você subiu antes. */
+    /* Busca o manifesto já publicado, para não apagar as regiões anteriores. */
     let regioes = [];
     try{
       const r = await fetch('dados/manifesto.json', {cache:'no-cache'});
       if(r.ok){
-        const m = await r.json();
-        regioes = (m.regioes || []).filter(x => x.id !== id);
+        regioes = ((await r.json()).regioes || []).filter(x => x.id !== id);
         if(regioes.length) log(`  ${regioes.length} região(ões) já publicada(s) preservada(s)`, 'bom');
       }
-    }catch(e){ /* primeira região do portal */ }
+    }catch(e){ /* primeira região, ou página aberta direto do arquivo */ }
     regioes.push({ id, nome, meta:`${id}.json` });
-    regioes.sort((a,b) => a.nome.localeCompare(b.nome,'pt-BR'));
+    regioes.sort((a,b) => a.nome.localeCompare(b.nome, 'pt-BR'));
 
-    log(`pronto em ${((Date.now()-inicio)/1000).toFixed(0)} s`, 'bom');
+    log(`pronto em ${((Date.now()-t0)/1000).toFixed(0)} s`, 'bom');
     log('');
     log('composição do uso do solo:');
-    for(const [cod,q] of Object.entries(composicao).sort((a,b)=>b[1]-a[1])){
-      const pct = q/n*100;
-      if(pct >= 0.05) log(`  ${(NOMES_CLASSE[cod]||cod).padEnd(18)} ${pct.toFixed(1)} %`);
+    for(const [cod,q] of Object.entries(comp).sort((a,b) => b[1]-a[1])){
+      const p = q/n*100;
+      if(p >= 0.05) log(`  ${(NOMES_CLASSE[cod] || cod).padEnd(18)} ${p.toFixed(1)} %`);
     }
-
-    mostrarSaidas(id, binario, meta, { regioes });
+    mostrarSaidas(id, bin, meta, { regioes });
   }catch(err){
-    log('');
-    log('ERRO: ' + (err.message || err), 'erro');
-  }finally{
-    botao.disabled = false;
-  }
+    log(''); log('ERRO: ' + (err.message || err), 'erro');
+  }finally{ botao.disabled = false; }
 };
 
 /* --- downloads ------------------------------------------------------------ */
-function baixar(nomeArquivo, conteudo, tipo){
+function baixar(nome, conteudo, tipo){
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([conteudo], {type:tipo}));
-  a.download = nomeArquivo;
-  a.click();
+  a.download = nome; a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 
-function mostrarSaidas(id, binario, meta, manifesto){
-  const alvo = $('saidas');
-  alvo.hidden = false;
-  const mb = (binario.length/1e6).toFixed(2);
+function mostrarSaidas(id, bin, meta, manifesto){
+  const alvo = $('saidas'); alvo.hidden = false;
+  const mb = (bin.length/1e6).toFixed(2);
   alvo.innerHTML = `
     <h2 style="font-size:.95rem;margin:0 0 .2rem">Baixe os três arquivos</h2>
-    <p class="nota" style="margin:0 0 .8rem">Depois, no GitHub, entre em
-      <code>docs/dados/</code> e use "Add file" → "Upload files" para subir os três juntos.</p>
+    <p class="nota" style="margin:0 0 .8rem">No GitHub, entre em <code>docs/dados/</code>
+      e use "Add file" → "Upload files" para subir os três juntos.</p>
     <button class="baixar" id="b1">${id}.bin.gz  ·  ${mb} MB</button>
     <button class="baixar" id="b2">${id}.json</button>
     <button class="baixar" id="b3">manifesto.json  ·  ${manifesto.regioes.length} região(ões)</button>
-    ${+mb > 8 ? `<div class="aviso">${mb} MB é um download pesado para a conexão de uma
-      prefeitura pequena. Vale recortar a região em pedaços menores.</div>` : ''}`;
-  $('b1').onclick = () => baixar(`${id}.bin.gz`, binario, 'application/gzip');
+    ${+mb > 8 ? `<div class="aviso">${mb} MB é pesado para a conexão de uma prefeitura pequena.
+      Vale recortar a região em pedaços menores.</div>` : ''}`;
+  $('b1').onclick = () => baixar(`${id}.bin.gz`, bin, 'application/gzip');
   $('b2').onclick = () => baixar(`${id}.json`, JSON.stringify(meta, null, 1), 'application/json');
   $('b3').onclick = () => baixar('manifesto.json', JSON.stringify(manifesto, null, 1), 'application/json');
 }
