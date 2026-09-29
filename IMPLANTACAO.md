@@ -1,23 +1,81 @@
 # Como colocar no ar
 
-Duas etapas, e só a primeira precisa de Python. A segunda é arrastar uma
-pasta no navegador.
+O portal são duas páginas, e nenhuma delas precisa de servidor:
+
+- `docs/index.html` — o portal. Clica no mapa, calcula a vazão.
+- `docs/preparar.html` — onde você arrasta os GeoTIFFs e ela gera os dados
+  de uma região nova. Roda inteira no navegador, sem Python.
 
 ```
-preparar_regiao.py     roda na máquina de vocês, uma vez por região
-hidro/                 o motor hidrológico (não precisa mexer)
 docs/
   index.html           o portal
-  dados/               o que o preparar_regiao.py gera
+  preparar.html        a página de preparo
+  dados/               o que a página de preparo gera
+hidro/                 versão em Python do mesmo motor (opcional)
+preparar_regiao.py     versão em linha de comando (opcional)
 ```
 
 O `index.html` funciona sozinho. Se não encontrar `dados/manifesto.json`,
-ele abre em modo demonstração com relevo sintético. Assim vocês podem
-publicar hoje e ir acrescentando regiões reais depois.
+abre em modo demonstração com relevo sintético. Dá para publicar hoje e ir
+acrescentando regiões reais depois.
 
 ---
 
-## Etapa 1 — preparar uma região
+## Acrescentar uma região
+
+Abra `preparar.html`, no endereço publicado ou dando dois cliques no arquivo
+na sua máquina. Funciona dos dois jeitos, e não precisa de QGIS nem de Python.
+
+1. Arraste o GeoTIFF do modelo de elevação. Pode estar em graus: a página
+   reprojeta sozinha para UTM, detectando a zona pela longitude.
+2. Arraste sobre a prévia do relevo para recortar a região, e escolha a
+   resolução. A página mostra a área, o número de células e o tamanho
+   estimado do download, para você decidir antes de processar.
+3. Arraste o GeoTIFF do MapBiomas. Pode estar em outra resolução, outro
+   recorte e outro CRS.
+4. Preencha o identificador, o nome e os coeficientes da curva IDF.
+5. Clique em "Preparar região" e leia o registro que aparece.
+6. Baixe os três arquivos e suba no GitHub, em `docs/dados/`, por
+   "Add file" → "Upload files".
+
+A página busca sozinha o `manifesto.json` já publicado e preserva as regiões
+que você subiu antes, então dá para ir acrescentando uma por vez.
+
+### Onde baixar os dados sem QGIS
+
+**Modelo de elevação.** O OpenTopography tem uma interface web onde você
+desenha o retângulo no mapa, escolhe o Copernicus GLO-30 e baixa um GeoTIFF.
+Vem em graus, e tudo bem: a página de preparo reprojeta. O FABDEM tende a
+ser melhor em SC porque remove vegetação, e a Mata Atlântica introduz vários
+metros de erro em MDE de satélite bruto; confira a licença.
+
+**Uso e cobertura.** MapBiomas, pela área de downloads do site deles, que
+oferece recortes por estado e por município.
+
+Não tenho acesso a busca, então confirme endereços, licenças e formatos
+antes de fechar o plano de dados.
+
+### Precisão da reprojeção
+
+A reprojeção feita no navegador foi comparada com a do GDAL na mesma grade,
+num terreno com 600 m de amplitude e cerca de 10 m de desnível entre células
+vizinhas. Erro médio de 0,025 m contra 0,004 m do GDAL, erro absoluto médio
+de 3,73 m contra 3,80 m. São equivalentes, e o resíduo vem da dupla
+reamostragem, não do método.
+
+A direção de fluxo e as classes de uso do solo batem em 100% com a versão
+Python, célula a célula.
+
+### O script em Python continua existindo
+
+`preparar_regiao.py` faz exatamente a mesma coisa pela linha de comando.
+A saída dos dois foi comparada célula a célula: a direção de fluxo e as
+classes de uso do solo batem em 100%. Use o script quando for processar
+muitas regiões de uma vez; para uma ou duas, a página é mais simples.
+
+---
+
+## Processando em lote pela linha de comando
 
 ```bash
 pip install numpy scipy rasterio pyproj
@@ -85,7 +143,7 @@ dessas bases antes de fechar o plano de dados.
 
 ---
 
-## Etapa 2 — publicar
+## Publicar
 
 Copie a pasta `docs/` inteira para qualquer hospedagem de arquivo estático.
 Não há servidor, banco nem build.
