@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Preparar região — Vazão de microbacia</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --papel:#E8EAE4; --papel2:#DCE0D8; --tinta:#1B3A34; --fraca:#5C7169;
+  --agua:#1F6E8C; --curva:#A8825C; --alerta:#B0492B; --ok:#1F8D49;
+  --linha:rgba(27,58,52,.18); --campo:#FFFFFF; --barra:#12262B;
+  --sans:"IBM Plex Sans Condensed",-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,monospace;
+  box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --papel:#16262B; --papel2:#0F1C20; --tinta:#DCE6E2; --fraca:#8FA7A0;
+  --linha:rgba(220,230,226,.16); --campo:#1E3238; }}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{font-family:var(--sans);color:var(--tinta);background:var(--papel2);
+  overflow-y:auto;-webkit-text-size-adjust:100%}
+header{background:var(--barra);color:#E8EAE4;padding:.6rem 1rem;
+  border-bottom:3px solid var(--curva);display:flex;gap:.9rem;align-items:baseline;flex-wrap:wrap}
+header h1{font-size:1rem;font-weight:600;margin:0}
+header a{color:#8FB0A8;font-size:.8rem;margin-left:auto}
+.folha{max-width:47rem;margin:0 auto;padding:1.4rem 1.1rem 4rem}
+.intro{line-height:1.6;margin:0 0 1.8rem;max-width:62ch}
+.passo{border-top:1px solid var(--linha);padding-top:1.1rem;margin-top:1.6rem}
+.passo h2{font-size:.95rem;font-weight:600;margin:0 0 .15rem;display:flex;gap:.55rem;align-items:baseline}
+.passo h2 em{font-family:var(--mono);font-style:normal;font-size:.8rem;color:var(--curva)}
+.passo p{margin:.2rem 0 .8rem;font-size:.86rem;line-height:1.55;color:var(--fraca);max-width:60ch}
+.solta{border:1.5px dashed var(--linha);border-radius:3px;padding:1.1rem;text-align:center;
+  background:var(--papel);cursor:pointer;transition:border-color .12s}
+.solta:hover,.solta.sobre{border-color:var(--agua)}
+.solta b{display:block;font-size:.9rem;margin-bottom:.15rem}
+.solta span{font-size:.8rem;color:var(--fraca)}
+.solta.pronto{border-style:solid;border-color:var(--ok);background:var(--campo)}
+.solta.pronto b{color:var(--ok)}
+.grade{display:grid;grid-template-columns:repeat(auto-fit,minmax(9rem,1fr));gap:.7rem}
+label{display:flex;flex-direction:column;gap:.2rem;font-size:.78rem;color:var(--fraca)}
+input{font-family:var(--mono);font-size:.85rem;padding:.4rem .5rem;border:1px solid var(--linha);
+  border-radius:2px;background:var(--campo);color:var(--tinta);width:100%}
+input:focus-visible,button:focus-visible,.solta:focus-visible{outline:2px solid var(--curva);outline-offset:1px}
+button.acao{font-family:var(--sans);font-size:.92rem;font-weight:500;color:#E8EAE4;background:var(--agua);
+  border:none;border-radius:2px;padding:.65rem 1.3rem;cursor:pointer;margin-top:.4rem}
+button.acao[disabled]{background:var(--fraca);cursor:not-allowed;opacity:.55}
+button.baixar{display:block;width:100%;text-align:left;font-family:var(--mono);font-size:.83rem;
+  background:var(--campo);color:var(--agua);border:1px solid var(--agua);border-radius:2px;
+  padding:.55rem .7rem;cursor:pointer;margin-bottom:.45rem}
+#registro{font-family:var(--mono);font-size:.78rem;line-height:1.65;background:var(--barra);
+  color:#BFD4CD;border-radius:3px;padding:.8rem .9rem;margin-top:1rem;white-space:pre-wrap;
+  max-height:22rem;overflow-y:auto}
+#registro .erro{color:#F0A08A}
+#registro .bom{color:#8ED9A8}
+#registro .atencao{color:#E9C46A}
+.aviso{border-left:3px solid var(--alerta);padding:.45rem 0 .45rem .7rem;font-size:.84rem;
+  line-height:1.55;margin:.8rem 0}
+.nota{font-size:.78rem;color:var(--fraca);line-height:1.5}
+code{font-family:var(--mono);font-size:.92em}
+</style>
+</head>
+<body>
+<header>
+  <h1>Preparar região</h1>
+  <a href="./">← voltar ao portal</a>
+</header>
+<div class="folha">
+
+<p class="intro">Arraste o modelo de elevação e o mapa de uso do solo. Esta página faz
+todo o processamento aqui mesmo, no seu navegador: alinha os dois rasters, traduz as classes
+do MapBiomas, preenche as depressões do terreno e calcula a direção de fluxo. No fim você
+baixa três arquivos e sobe no GitHub, dentro de <code>docs/dados/</code>.
+Nada é enviado para lugar nenhum.</p>
+
+<div class="passo">
+  <h2><em>1</em>Modelo de elevação</h2>
+  <p>GeoTIFF em CRS projetado em metros. Em Santa Catarina, SIRGAS 2000 / UTM 22S
+  (EPSG:31982). Se o seu estiver em graus, exporte do QGIS com "Salvar como" escolhendo esse CRS.</p>
+  <div class="solta" id="solta-mde" tabindex="0" role="button">
+    <b>Solte o MDE aqui</b><span>ou clique para escolher · .tif</span>
+  </div>
+  <input type="file" id="arq-mde" accept=".tif,.tiff" hidden>
+</div>
+
+<div class="passo">
+  <h2><em>2</em>Uso e cobertura do solo</h2>
+  <p>Recorte do MapBiomas da mesma área. Pode estar em outra resolução, outro recorte e
+  outro CRS: a página alinha sozinha sobre a grade do MDE.</p>
+  <div class="solta" id="solta-uso" tabindex="0" role="button">
+    <b>Solte o MapBiomas aqui</b><span>ou clique para escolher · .tif</span>
+  </div>
+  <input type="file" id="arq-uso" accept=".tif,.tiff" hidden>
+</div>
+
+<div class="passo">
+  <h2><em>3</em>Identificação e chuva de projeto</h2>
+  <p>O identificador vira nome de arquivo: use letras minúsculas e hífen. Os coeficientes
+  são da equação <code>i = K · TR^a / (t + b)^c</code>, com i em mm/h e t em minutos. Para SC,
+  use as equações de chuvas intensas da Epagri, do município da região.</p>
+  <div class="grade">
+    <label>Identificador<input id="c-id" value="rio-negro-alto" spellcheck="false"></label>
+    <label>Nome exibido<input id="c-nome" value="Alto Rio Negro"></label>
+  </div>
+  <div class="grade" style="margin-top:.7rem">
+    <label>K<input id="c-K" type="number" step="1" value="1000"></label>
+    <label>a<input id="c-a" type="number" step="0.001" value="0.15"></label>
+    <label>b<input id="c-b" type="number" step="0.1" value="10"></label>
+    <label>c<input id="c-c" type="number" step="0.001" value="0.75"></label>
+  </div>
+</div>
+
+<div class="passo">
+  <h2><em>4</em>Processar</h2>
+  <button class="acao" id="bt-processar" disabled>Preparar região</button>
+  <div id="registro" hidden></div>
+  <div id="saidas" hidden style="margin-top:1rem"></div>
+</div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/geotiff@3.0.5/dist-browser/geotiff.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.11.0/proj4.js"></script>
+<script>
+"use strict";
+/* ===========================================================================
+   NÚCLEO DE PREPARO — roda no navegador, sem servidor e sem Python.
+
+   Faz o mesmo que o preparar_regiao.py:
+     1. lê o MDE e o uso do solo
+     2. alinha o uso sobre a grade do MDE (reprojetando se preciso)
+     3. traduz os códigos do MapBiomas para as 8 classes hidrológicas
+     4. preenche depressões (Priority-Flood + epsilon)
+     5. calcula a direção de fluxo D8
+     6. empacota tudo comprimido
+   =========================================================================== */
+
+const DESL = [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
+
+const MAPA_MAPBIOMAS = {
+  1: [1,3,4,5,49],                              // Floresta
+  2: [9],                                       // Silvicultura
+  3: [10,11,12,23,29,32,50],                    // Campo natural
+  4: [15,21],                                   // Pastagem
+  5: [14,18,19,20,35,36,39,40,41,46,47,48,62],  // Agricultura
+  6: [22,25,30],                                // Solo exposto
+  7: [24],                                      // Área urbanizada
+  8: [26,31,33],                                // Corpo d'água
+};
+const CLASSE_PADRAO = 4;
+const NOMES_CLASSE = {1:"Floresta",2:"Silvicultura",3:"Campo natural",4:"Pastagem",
+  5:"Agricultura",6:"Solo exposto",7:"Área urbanizada",8:"Corpo d'água"};
+
+/* --- CRS projetados usados no Brasil --------------------------------------
+   O portal precisa de uma string proj4 para converter o clique em célula.
+   Se o EPSG do seu MDE não estiver aqui, a página pede a string à mão (o
+   QGIS mostra em Propriedades da camada). */
+function proj4De(epsg){
+  if(epsg>=31978 && epsg<=31985)   // SIRGAS 2000 / UTM 18S a 25S
+    return `+proj=utm +zone=${epsg-31960} +south +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs`;
+  if(epsg>=32718 && epsg<=32725)   // WGS 84 / UTM 18S a 25S
+    return `+proj=utm +zone=${epsg-32700} +south +datum=WGS84 +units=m +no_defs`;
+  if(epsg>=29187 && epsg<=29195)   // SAD69 / UTM 17S a 25S
+    return `+proj=utm +zone=${epsg-29170} +south +ellps=aust_SA `
+         + `+towgs84=-66.87,4.37,-38.52,0,0,0,0 +units=m +no_defs`;
+  if(epsg===5880)                  // SIRGAS 2000 / Brazil Polyconic
+    return "+proj=poly +lat_0=0 +lon_0=-54 +x_0=5000000 +y_0=10000000 "
+         + "+ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs";
+  return null;
+}
+
+function ehGeografico(epsg){ return epsg===4326 || epsg===4674 || epsg===4618; }
+
+/* --- Monte binário sobre arrays tipados -----------------------------------
+   Um heap comum de objetos criaria milhões de alocações e travaria a aba. */
+class Monte {
+  constructor(cap){ this.p=new Float64Array(cap); this.i=new Int32Array(cap); this.n=0; }
+  _troca(a,b){
+    const tp=this.p[a]; this.p[a]=this.p[b]; this.p[b]=tp;
+    const ti=this.i[a]; this.i[a]=this.i[b]; this.i[b]=ti;
+  }
+  push(prio, idx){
+    let k=this.n++;
+    this.p[k]=prio; this.i[k]=idx;
+    while(k>0){ const pai=(k-1)>>1; if(this.p[pai]<=this.p[k]) break; this._troca(pai,k); k=pai; }
+  }
+  pop(){
+    this.popP=this.p[0]; this.popI=this.i[0];
+    this.n--;
+    if(this.n>0){
+      this.p[0]=this.p[this.n]; this.i[0]=this.i[this.n];
+      let k=0;
+      for(;;){
+        const e=2*k+1, d=2*k+2; let m=k;
+        if(e<this.n && this.p[e]<this.p[m]) m=e;
+        if(d<this.n && this.p[d]<this.p[m]) m=d;
+        if(m===k) break;
+        this._troca(m,k); k=m;
+      }
+    }
+  }
+}
+
+/* --- 1. Alinhamento do uso do solo sobre a grade do MDE -------------------
+   Os dois rasters quase nunca vêm na mesma grade: o MapBiomas costuma vir em
+   coordenadas geográficas e o MDE em UTM. Em vez de reprojetar célula a
+   célula (milhões de chamadas), converte-se uma malha grossa e interpola-se
+   o resto. O erro fica muito abaixo de um pixel. */
+function alinharUso(mdeInfo, usoInfo, transformar, passo=16){
+  const {lin, col, x0, y0, cel} = mdeInfo;
+  const saida = new Int32Array(lin*col);
+
+  const nl = Math.ceil(lin/passo)+1, nc = Math.ceil(col/passo)+1;
+  const malhaU = new Float64Array(nl*nc), malhaV = new Float64Array(nl*nc);
+
+  for(let a=0;a<nl;a++) for(let b=0;b<nc;b++){
+    // Os nós da última linha e coluna caem fora do raster de propósito: a
+    // transformação vale fora dos limites, e truncá-los deformaria o
+    // espaçamento da malha e deslocaria a interpolação perto da borda.
+    const i=a*passo, j=b*passo;
+    const x=x0+(j+0.5)*cel, y=y0-(i+0.5)*cel;
+    const [xu,yu]=transformar(x,y);
+    malhaU[a*nc+b]=(xu-usoInfo.x0)/usoInfo.celX;
+    malhaV[a*nc+b]=(usoInfo.y0-yu)/usoInfo.celY;
+  }
+
+  for(let i=0;i<lin;i++){
+    const a=Math.min((i/passo)|0, nl-2), fi=(i-a*passo)/passo;
+    for(let j=0;j<col;j++){
+      const b=Math.min((j/passo)|0, nc-2), fj=(j-b*passo)/passo;
+      const q=a*nc+b;
+      const u = malhaU[q]*(1-fi)*(1-fj) + malhaU[q+1]*(1-fi)*fj
+              + malhaU[q+nc]*fi*(1-fj)  + malhaU[q+nc+1]*fi*fj;
+      const v = malhaV[q]*(1-fi)*(1-fj) + malhaV[q+1]*(1-fi)*fj
+              + malhaV[q+nc]*fi*(1-fj)  + malhaV[q+nc+1]*fi*fj;
+      const uu=Math.round(u-0.5), vv=Math.round(v-0.5);
+      saida[i*col+j] = (uu>=0 && vv>=0 && uu<usoInfo.col && vv<usoInfo.lin)
+        ? usoInfo.dados[vv*usoInfo.col+uu] : 0;
+    }
+  }
+  return saida;
+}
+
+/* --- 2. Tradução dos códigos do MapBiomas --------------------------------- */
+function remapearUso(bruto){
+  const tabela = new Uint8Array(256).fill(0);
+  for(const destino in MAPA_MAPBIOMAS)
+    for(const cod of MAPA_MAPBIOMAS[destino]) tabela[cod]=+destino;
+
+  const saida = new Uint8Array(bruto.length);
+  const naoMapeados = {};
+  for(let k=0;k<bruto.length;k++){
+    const c=bruto[k];
+    const t=(c>=0 && c<256) ? tabela[c] : 0;
+    if(t) saida[k]=t;
+    else{
+      saida[k]=CLASSE_PADRAO;
+      if(c!==0 && c!==27 && c!==255) naoMapeados[c]=(naoMapeados[c]||0)+1;
+    }
+  }
+  return {uso:saida, naoMapeados};
+}
+
+/* --- 3. Preenchimento de depressões (Priority-Flood + epsilon) ------------
+   Além de encher depressões, impõe gradiente mínimo nas áreas planas, para
+   que toda célula interna tenha um vizinho mais baixo. Sem isso, várzeas e
+   reservatórios viram buracos negros no traçado de fluxo. */
+async function preencherDepressoes(mde, mascara, lin, col, epsilon, aoProgredir){
+  const n=lin*col;
+  const cheio=new Float64Array(n);
+  for(let k=0;k<n;k++) cheio[k]= mascara[k] ? mde[k] : Infinity;
+
+  const fechada=new Uint8Array(n);
+  const fila=new Monte(n);
+
+  for(let i=0;i<lin;i++) for(let j=0;j<col;j++){
+    const k=i*col+j;
+    if(!mascara[k]){ fechada[k]=1; continue; }
+    let borda = (i===0||j===0||i===lin-1||j===col-1);
+    if(!borda) for(const [di,dj] of DESL){
+      if(!mascara[(i+di)*col+(j+dj)]){ borda=true; break; }
+    }
+    if(borda){ fila.push(cheio[k], k); fechada[k]=1; }
+  }
+
+  let contador=0;
+  while(fila.n>0){
+    fila.pop();
+    const z=fila.popP, k=fila.popI;
+    const i=(k/col)|0, j=k%col;
+    for(const [di,dj] of DESL){
+      const vi=i+di, vj=j+dj;
+      if(vi<0||vj<0||vi>=lin||vj>=col) continue;
+      const v=vi*col+vj;
+      if(fechada[v]) continue;
+      if(cheio[v]<=z) cheio[v]=z+epsilon;
+      fechada[v]=1;
+      fila.push(cheio[v], v);
+    }
+    if((++contador & 0x3FFFF)===0 && aoProgredir){
+      aoProgredir(contador/n);
+      await new Promise(r=>setTimeout(r));   // devolve o controle à aba
+    }
+  }
+  return cheio;
+}
+
+/* --- 4. Direção de fluxo D8 -----------------------------------------------
+   Código 0 = exutório ou sem dado; 1 a 8 = índice do vizinho em DESL. */
+function direcaoD8(cheio, mascara, lin, col, cel){
+  const n=lin*col, d8=new Uint8Array(n);
+  for(let i=0;i<lin;i++) for(let j=0;j<col;j++){
+    const k=i*col+j;
+    if(!mascara[k]) continue;
+    let melhor=0, codigo=0;
+    for(let p=0;p<8;p++){
+      const [di,dj]=DESL[p];
+      const vi=i+di, vj=j+dj;
+      if(vi<0||vj<0||vi>=lin||vj>=col) continue;
+      const v=vi*col+vj;
+      if(!mascara[v]) continue;
+      const grad=(cheio[k]-cheio[v])/(cel*Math.hypot(di,dj));
+      if(grad>melhor){ melhor=grad; codigo=p+1; }
+    }
+    d8[k]=codigo;
+  }
+  return d8;
+}
+
+/* --- 5. Empacotamento ----------------------------------------------------- */
+function montarBinario(cheio, d8, uso, n){
+  const buf=new ArrayBuffer(n*4);
+  const mde16=new Int16Array(buf, 0, n);
+  for(let k=0;k<n;k++){
+    const z=cheio[k];
+    mde16[k]= isFinite(z) ? Math.max(-32000, Math.min(32000, Math.round(z))) : 0;
+  }
+  new Uint8Array(buf, n*2, n).set(d8);
+  new Uint8Array(buf, n*3, n).set(uso);
+  return new Uint8Array(buf);
+}
+
+async function comprimir(u8){
+  const fluxo=new Blob([u8]).stream().pipeThrough(new CompressionStream('gzip'));
+  return new Uint8Array(await new Response(fluxo).arrayBuffer());
+}
+
+
+/* ===========================================================================
+   INTERFACE DA PÁGINA DE PREPARO
+   =========================================================================== */
+const $ = id => document.getElementById(id);
+const arquivos = { mde:null, uso:null };
+
+/* --- registro de progresso na tela ---------------------------------------- */
+const reg = $('registro');
+function log(texto, tipo){
+  reg.hidden = false;
+  const linha = document.createElement('div');
+  if(tipo) linha.className = tipo;
+  linha.textContent = texto;
+  reg.appendChild(linha);
+  reg.scrollTop = reg.scrollHeight;
+}
+const respirar = () => new Promise(r => setTimeout(r, 16));
+
+/* --- áreas de soltar ------------------------------------------------------ */
+function ligarSolta(idZona, idInput, chave, rotulo){
+  const zona = $(idZona), campo = $(idInput);
+  const aceitar = arq => {
+    if(!arq) return;
+    if(!/\.tiff?$/i.test(arq.name)){
+      log(`"${arq.name}" não é um GeoTIFF. Esperado .tif`, 'erro');
+      return;
+    }
+    arquivos[chave] = arq;
+    zona.classList.add('pronto');
+    zona.innerHTML = `<b>${rotulo} carregado</b><span>${arq.name} · `
+                   + `${(arq.size/1e6).toFixed(1)} MB · clique para trocar</span>`;
+    $('bt-processar').disabled = !(arquivos.mde && arquivos.uso);
+  };
+  zona.onclick = () => campo.click();
+  zona.onkeydown = ev => { if(ev.key==='Enter'||ev.key===' '){ ev.preventDefault(); campo.click(); } };
+  campo.onchange = () => aceitar(campo.files[0]);
+  zona.ondragover = ev => { ev.preventDefault(); zona.classList.add('sobre'); };
+  zona.ondragleave = () => zona.classList.remove('sobre');
+  zona.ondrop = ev => {
+    ev.preventDefault(); zona.classList.remove('sobre');
+    aceitar(ev.dataTransfer.files[0]);
+  };
+}
+ligarSolta('solta-mde','arq-mde','mde','MDE');
+ligarSolta('solta-uso','arq-uso','uso','MapBiomas');
+
+/* --- leitura de GeoTIFF --------------------------------------------------- */
+async function lerTIFF(arquivo){
+  const tif = await GeoTIFF.fromArrayBuffer(await arquivo.arrayBuffer());
+  const img = await tif.getImage();
+  const [dados] = await img.readRasters();
+  const [x0, y0] = img.getOrigin();
+  const [rx, ry] = img.getResolution();
+  const chaves = img.getGeoKeys() || {};
+  let semDado = null;
+  try { semDado = img.getGDALNoData(); } catch(e){ /* sem tag de nodata */ }
+  return { dados, lin:img.getHeight(), col:img.getWidth(), x0, y0,
+           celX:Math.abs(rx), celY:Math.abs(ry), cel:Math.abs(rx),
+           epsg: chaves.ProjectedCSTypeGeoKey || chaves.GeographicTypeGeoKey || 0,
+           citacao: chaves.GTCitationGeoKey || chaves.GeogCitationGeoKey || '',
+           semDado };
+}
+
+/* Converte do CRS do MDE para o CRS do uso do solo. Identidade quando são o
+   mesmo, o que é o caso comum. */
+function fazerTransformador(mde, uso, proj4Mde){
+  if(uso.epsg === mde.epsg || !uso.epsg) return (x,y) => [x,y];
+  let destino;
+  if(ehGeografico(uso.epsg)) destino = 'EPSG:4326';
+  else {
+    destino = proj4De(uso.epsg);
+    if(!destino) throw new Error(
+      `Não reconheço o EPSG:${uso.epsg} do uso do solo. Reprojete-o para o mesmo CRS do MDE no QGIS.`);
+  }
+  if(ehGeografico(uso.epsg) && uso.epsg !== 4326)
+    log(`  o uso do solo está em EPSG:${uso.epsg}; tratando como WGS84 `
+      + `(diferença abaixo de 1 m, irrelevante aqui)`, 'atencao');
+  return (x,y) => proj4(proj4Mde, destino, [x,y]);
+}
+
+/* --- orquestração --------------------------------------------------------- */
+$('bt-processar').onclick = async () => {
+  const botao = $('bt-processar');
+  botao.disabled = true;
+  reg.innerHTML = '';
+  $('saidas').hidden = true;
+  const inicio = Date.now();
+
+  try{
+    const id = $('c-id').value.trim().toLowerCase().replace(/[^a-z0-9-]/g,'-');
+    if(!id) throw new Error("Preencha o identificador da região.");
+    const nome = $('c-nome').value.trim() || id;
+
+    log('lendo o modelo de elevação…');
+    await respirar();
+    const mde = await lerTIFF(arquivos.mde);
+    log(`  ${mde.lin} × ${mde.col} células · ${mde.cel.toFixed(1)} m · `
+      + `EPSG:${mde.epsg}${mde.citacao?' ('+mde.citacao+')':''}`);
+
+    if(!mde.epsg) throw new Error(
+      "O MDE não traz informação de CRS. Reexporte pelo QGIS em EPSG:31982.");
+    if(ehGeografico(mde.epsg)) throw new Error(
+      `O MDE está em coordenadas geográficas (EPSG:${mde.epsg}). Área e declividade `
+    + `sairiam erradas. No QGIS, Camada → Salvar como, e escolha EPSG:31982.`);
+    const proj4Mde = proj4De(mde.epsg);
+    if(!proj4Mde) throw new Error(
+      `Não reconheço o EPSG:${mde.epsg}. Reprojete o MDE para EPSG:31982 (UTM 22S) no QGIS.`);
+    if(Math.abs(mde.celX - mde.celY) > 1e-6) throw new Error(
+      "As células do MDE não são quadradas. Reamostre no QGIS antes.");
+
+    const n = mde.lin * mde.col;
+    const areaKm2 = n * mde.cel * mde.cel / 1e6;
+    log(`  recorte de ${areaKm2.toLocaleString('pt-BR',{maximumFractionDigits:0})} km²`);
+    if(n > 12e6) throw new Error(
+      `${n.toLocaleString('pt-BR')} células é grande demais para o navegador. `
+    + `Recorte em pedaços menores ou reamostre para 30 m.`);
+    if(n > 5e6) log('  recorte grande: o processamento pode levar um minuto', 'atencao');
+
+    log('lendo o uso do solo…');
+    await respirar();
+    const uso = await lerTIFF(arquivos.uso);
+    log(`  ${uso.lin} × ${uso.col} células · EPSG:${uso.epsg}`);
+
+    log('alinhando o uso do solo sobre a grade do MDE…');
+    await respirar();
+    const bruto = alinharUso(mde, uso, fazerTransformador(mde, uso, proj4Mde));
+    const { uso:classes, naoMapeados } = remapearUso(bruto);
+
+    const pendentes = Object.entries(naoMapeados)
+      .map(([c,q]) => [c, q/n*100]).filter(([,p]) => p >= 0.05)
+      .sort((a,b) => b[1]-a[1]);
+    if(pendentes.length){
+      log('  códigos do MapBiomas sem tradução (viraram pastagem):', 'atencao');
+      for(const [c,p] of pendentes.slice(0,8))
+        log(`    código ${c}  ${p.toFixed(2)} % da área`, 'atencao');
+      log('  confira a legenda da coleção que você baixou antes de usar em projeto', 'atencao');
+    }else{
+      log('  todos os códigos reconhecidos', 'bom');
+    }
+
+    const composicao = {};
+    for(let k=0;k<n;k++) composicao[classes[k]] = (composicao[classes[k]]||0)+1;
+
+    log('preenchendo depressões do terreno…');
+    await respirar();
+    const mascara = new Uint8Array(n);
+    const sd = mde.semDado;
+    for(let k=0;k<n;k++){
+      const z = mde.dados[k];
+      mascara[k] = (isFinite(z) && (sd===null || z!==sd) && z > -1e4) ? 1 : 0;
+    }
+    let validas = 0; for(let k=0;k<n;k++) validas += mascara[k];
+    if(validas === 0) throw new Error("O MDE está todo vazio. Confira o recorte e o valor de nodata.");
+    if(validas < n) log(`  ${(100-validas/n*100).toFixed(1)} % do recorte é sem dado`);
+
+    let ultimo = -1;
+    const cheio = await preencherDepressoes(mde.dados, mascara, mde.lin, mde.col, 1e-4, f => {
+      const pct = Math.min(99, Math.round(f*100));
+      if(pct >= ultimo + 20){ ultimo = pct; log(`  ${pct} %`); }
+    });
+
+    log('calculando a direção de fluxo D8…');
+    await respirar();
+    const d8 = direcaoD8(cheio, mascara, mde.lin, mde.col, mde.cel);
+
+    log('comprimindo…');
+    await respirar();
+    const binario = await comprimir(montarBinario(cheio, d8, classes, n));
+
+    const meta = {
+      id, nome, lin:mde.lin, col:mde.col, celula:mde.cel,
+      origem:[mde.x0, mde.y0], proj4:proj4Mde, epsg:mde.epsg,
+      idf:{ K:+$('c-K').value, a:+$('c-a').value, b:+$('c-b').value, c:+$('c-c').value },
+      bin:`${id}.bin.gz`,
+      fonte:{ mde:arquivos.mde.name, uso:arquivos.uso.name,
+              gerado_em:new Date().toISOString().slice(0,10) },
+    };
+
+    /* Busca o manifesto que já está publicado, para não apagar as regiões
+       que você subiu antes. */
+    let regioes = [];
+    try{
+      const r = await fetch('dados/manifesto.json', {cache:'no-cache'});
+      if(r.ok){
+        const m = await r.json();
+        regioes = (m.regioes || []).filter(x => x.id !== id);
+        if(regioes.length) log(`  ${regioes.length} região(ões) já publicada(s) preservada(s)`, 'bom');
+      }
+    }catch(e){ /* primeira região do portal */ }
+    regioes.push({ id, nome, meta:`${id}.json` });
+    regioes.sort((a,b) => a.nome.localeCompare(b.nome,'pt-BR'));
+
+    log(`pronto em ${((Date.now()-inicio)/1000).toFixed(0)} s`, 'bom');
+    log('');
+    log('composição do uso do solo:');
+    for(const [cod,q] of Object.entries(composicao).sort((a,b)=>b[1]-a[1])){
+      const pct = q/n*100;
+      if(pct >= 0.05) log(`  ${(NOMES_CLASSE[cod]||cod).padEnd(18)} ${pct.toFixed(1)} %`);
+    }
+
+    mostrarSaidas(id, binario, meta, { regioes });
+  }catch(err){
+    log('');
+    log('ERRO: ' + (err.message || err), 'erro');
+  }finally{
+    botao.disabled = false;
+  }
+};
+
+/* --- downloads ------------------------------------------------------------ */
+function baixar(nomeArquivo, conteudo, tipo){
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([conteudo], {type:tipo}));
+  a.download = nomeArquivo;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+function mostrarSaidas(id, binario, meta, manifesto){
+  const alvo = $('saidas');
+  alvo.hidden = false;
+  const mb = (binario.length/1e6).toFixed(2);
+  alvo.innerHTML = `
+    <h2 style="font-size:.95rem;margin:0 0 .2rem">Baixe os três arquivos</h2>
+    <p class="nota" style="margin:0 0 .8rem">Depois, no GitHub, entre em
+      <code>docs/dados/</code> e use "Add file" → "Upload files" para subir os três juntos.</p>
+    <button class="baixar" id="b1">${id}.bin.gz  ·  ${mb} MB</button>
+    <button class="baixar" id="b2">${id}.json</button>
+    <button class="baixar" id="b3">manifesto.json  ·  ${manifesto.regioes.length} região(ões)</button>
+    ${+mb > 8 ? `<div class="aviso">${mb} MB é um download pesado para a conexão de uma
+      prefeitura pequena. Vale recortar a região em pedaços menores.</div>` : ''}`;
+  $('b1').onclick = () => baixar(`${id}.bin.gz`, binario, 'application/gzip');
+  $('b2').onclick = () => baixar(`${id}.json`, JSON.stringify(meta, null, 1), 'application/json');
+  $('b3').onclick = () => baixar('manifesto.json', JSON.stringify(manifesto, null, 1), 'application/json');
+}
+
+</script>
+</body>
+</html>
