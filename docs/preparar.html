@@ -20,6 +20,10 @@
 @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
   --papel:#16262B; --papel2:#0F1C20; --tinta:#DCE6E2; --fraca:#8FA7A0;
   --linha:rgba(220,230,226,.16); --campo:#1E3238; }}
+/* O atributo hidden do HTML funciona por uma regra da folha do navegador,
+   que qualquer display: definido aqui sobrescreve. Sem este !important,
+   elemento com display próprio nunca some ao receber hidden. */
+[hidden]{display:none !important}
 *{box-sizing:border-box}
 html,body{height:100%;margin:0}
 body{font-family:var(--sans);color:var(--tinta);background:var(--papel2);
@@ -95,6 +99,39 @@ Não precisa de QGIS, de Python nem de servidor, e nada sai do seu computador.</
   </div>
   <input type="file" id="arq-mde" accept=".tif,.tiff" hidden>
 
+  <details id="api-ot" style="margin-top:.9rem">
+    <summary>Buscar direto do OpenTopography, sem baixar à mão</summary>
+    <p class="nota" style="margin:.1rem 0 .8rem">Precisa de uma chave de API gratuita,
+    que sai no cadastro do OpenTopography, em "MyOpenTopo". A chave fica guardada só
+    neste navegador. <b>Não coloque a chave dentro do arquivo antes de publicar no
+    GitHub</b>, senão ela vira pública e qualquer um gasta a sua cota.</p>
+    <div class="grade">
+      <label>Chave de API<input id="ot-chave" type="password" placeholder="cole aqui" autocomplete="off"></label>
+      <label>Fonte<select id="ot-dem">
+        <option value="COP30">Copernicus GLO-30 (30 m)</option>
+        <option value="COP90">Copernicus GLO-90 (90 m)</option>
+        <option value="NASADEM">NASADEM (30 m)</option>
+        <option value="SRTMGL1">SRTM GL1 (30 m)</option>
+        <option value="AW3D30">ALOS AW3D30 (30 m)</option>
+      </select></label>
+    </div>
+    <div class="grade" style="margin-top:.6rem">
+      <label>Norte<input id="ot-n" type="number" step="0.01" value="-25.85"></label>
+      <label>Sul<input id="ot-s" type="number" step="0.01" value="-26.50"></label>
+      <label>Oeste<input id="ot-o" type="number" step="0.01" value="-50.15"></label>
+      <label>Leste<input id="ot-l" type="number" step="0.01" value="-49.15"></label>
+    </div>
+    <p class="nota" style="margin:.5rem 0 0">Os valores acima são um chute para a região de
+    Mafra e São Bento do Sul; confira num mapa. No Google Maps, clique com o botão direito
+    num ponto e ele mostra latitude e longitude.</p>
+    <div id="ot-resumo" class="resumo"></div>
+    <div class="linha-ctrl">
+      <button class="acao" id="ot-buscar" style="margin-top:0">Buscar MDE</button>
+      <button class="secundaria" id="ot-link" type="button">Copiar o endereço</button>
+    </div>
+    <div id="ot-saida" class="resumo"></div>
+  </details>
+
   <div id="caixa-previa" hidden style="margin-top:1rem">
     <p style="margin:0 0 .5rem">Arraste sobre o relevo para recortar a região.
     Recorte seguindo divisores de água e generoso a montante: bacia cortada
@@ -117,13 +154,36 @@ Não precisa de QGIS, de Python nem de servidor, e nada sai do seu computador.</
 
 <div class="passo">
   <h2><em>2</em>Uso e cobertura do solo</h2>
-  <p>Pode ser o GeoTIFF do <b>Brasil inteiro</b> do MapBiomas, sem recortar nada.
-  A página lê só a janela que cobre o seu MDE, então o tamanho do arquivo não importa.
-  Baixe uma vez e use para todas as regiões.</p>
-  <div class="solta" id="solta-uso" tabindex="0" role="button">
-    <b>Solte o MapBiomas aqui</b><span>ou clique para escolher · .tif, de qualquer tamanho</span>
+  <p>O GeoTIFF do MapBiomas é o Brasil inteiro, dezenas de gigabytes. Não precisa baixar:
+  a página lê pela internet apenas os blocos que cobrem o seu MDE. Se o navegador bloquear
+  a leitura remota, troque a origem para arquivo e arraste o .tif baixado, que o tamanho
+  também não importa.</p>
+  <div class="linha-ctrl" style="margin-bottom:.7rem">
+    <label style="flex-direction:row;align-items:center;gap:.4rem">Origem
+      <select id="uso-fonte">
+        <option value="url" selected>MapBiomas na nuvem, sem baixar</option>
+        <option value="arquivo">Arquivo no meu computador</option>
+      </select>
+    </label>
+    <label id="lb-ano" style="flex-direction:row;align-items:center;gap:.4rem">Ano
+      <select id="uso-ano"></select>
+    </label>
   </div>
-  <input type="file" id="arq-uso" accept=".tif,.tiff" hidden>
+
+  <div id="bloco-url">
+    <input id="uso-url" spellcheck="false" style="font-size:.74rem">
+    <div class="linha-ctrl">
+      <button class="acao" id="uso-conectar" style="margin-top:0">Conectar</button>
+    </div>
+    <div id="uso-status" class="resumo"></div>
+  </div>
+
+  <div id="bloco-arquivo" hidden>
+    <div class="solta" id="solta-uso" tabindex="0" role="button">
+      <b>Solte o MapBiomas aqui</b><span>ou clique para escolher · .tif, de qualquer tamanho</span>
+    </div>
+    <input type="file" id="arq-uso" accept=".tif,.tiff" hidden>
+  </div>
   <div class="linha-ctrl">
     <label style="flex-direction:row;align-items:center;gap:.4rem">
       Legenda do arquivo
@@ -472,8 +532,10 @@ const nBR = v => v.toLocaleString('pt-BR', {maximumFractionDigits:0});
    fromBlob lê o arquivo por pedaços, direto do disco, em vez de carregar tudo
    na memória. É o que permite apontar para o GeoTIFF do Brasil inteiro sem
    recortar nada antes: depois, só a janela que interessa é lida. */
-async function abrirTIFF(arquivo){
-  const tif = await GeoTIFF.fromBlob(arquivo);
+async function abrirTIFF(origem){
+  const tif = typeof origem === 'string'
+    ? await GeoTIFF.fromUrl(origem)      // lê por faixas de bytes, sem baixar o arquivo
+    : await GeoTIFF.fromBlob(origem);    // lê por pedaços, direto do disco
   const img = await tif.getImage();
   const [x0, y0] = img.getOrigin();
   const [rx, ry] = img.getResolution();
@@ -555,6 +617,7 @@ function ligarSolta(idZona, idInput, chave, rotulo, aoCarregar){
     }
     atualizarBotao();
   };
+  if(chave === 'mde') receberMDE = aceitar;
   zona.onclick = () => campo.click();
   zona.onkeydown = ev => { if(ev.key === 'Enter' || ev.key === ' '){ ev.preventDefault(); campo.click(); } };
   campo.onchange = () => aceitar(campo.files[0]);
@@ -711,6 +774,7 @@ function definirAlvo(){
 }
 $('c-celula').oninput = () => { if(st.rect) definirAlvo(); };
 
+let receberMDE = null;   // definido por ligarSolta, reusado pela busca na API
 ligarSolta('solta-mde', 'arq-mde', 'mde', 'MDE', info => {
   st.rect = { i0:0, j0:0, i1:info.lin, j1:info.col };
   desenharPrevia(); ligarArrasto(); definirAlvo();
@@ -845,6 +909,173 @@ function mostrarSaidas(id, bin, meta, manifesto){
   $('b2').onclick = () => baixar(`${id}.json`, JSON.stringify(meta, null, 1), 'application/json');
   $('b3').onclick = () => baixar('manifesto.json', JSON.stringify(manifesto, null, 1), 'application/json');
 }
+
+/* ===========================================================================
+   BUSCA DIRETA NO OPENTOPOGRAPHY
+
+   A API globaldem devolve um GeoTIFF para uma caixa de coordenadas. Se o
+   navegador conseguir chamá-la, o arquivo entra direto no fluxo, sem download
+   manual. Se for barrado por CORS ou pela rede, a página entrega o endereço
+   pronto para abrir em outra aba: o resultado é o mesmo arquivo, só que
+   baixado à mão e arrastado aqui.
+   =========================================================================== */
+const OT_BASE = 'https://portal.opentopography.org/API/globaldem';
+const RESOL = { COP30:30, COP90:90, NASADEM:30, SRTMGL1:30, AW3D30:30 };
+
+try{
+  const guardada = localStorage.getItem('ot-chave');
+  if(guardada) $('ot-chave').value = guardada;
+}catch(e){ /* navegador sem armazenamento local */ }
+
+function caixaOT(){
+  const n = +$('ot-n').value, s = +$('ot-s').value;
+  const o = +$('ot-o').value, l = +$('ot-l').value;
+  if(!(n > s) || !(l > o)) throw new Error("Norte precisa ser maior que sul, e leste que oeste.");
+  if(Math.abs(n) > 60 || Math.abs(s) > 60) throw new Error("Latitude fora do alcance destes dados.");
+  return { n, s, o, l };
+}
+
+function urlOT(){
+  const c = caixaOT();
+  const chave = $('ot-chave').value.trim();
+  const p = new URLSearchParams({ demtype:$('ot-dem').value, south:c.s, north:c.n,
+    west:c.o, east:c.l, outputFormat:'GTiff' });
+  if(chave) p.set('API_Key', chave);
+  return `${OT_BASE}?${p}`;
+}
+
+function resumoOT(){
+  const el = $('ot-resumo');
+  try{
+    const c = caixaOT();
+    const latM = (c.n + c.s)/2;
+    const larg = (c.l - c.o)*111.32*Math.cos(latM*Math.PI/180);
+    const alt  = (c.n - c.s)*110.57;
+    const km2  = larg*alt;
+    const cel  = RESOL[$('ot-dem').value];
+    const px   = km2*1e6/(cel*cel);
+    const grande = px > LIMITE_MDE;
+    el.innerHTML = `<b>${nBR(km2)} km²</b> · ${larg.toFixed(0)} × ${alt.toFixed(0)} km · `
+      + `cerca de ${nBR(px)} pixels a ${cel} m`
+      + (grande ? `<br><span class="erro">acima do que a página aguarda `
+                + `(${nBR(LIMITE_MDE)} pixels). Reduza a caixa ou use o GLO-90.</span>` : '');
+  }catch(err){ el.innerHTML = `<span class="erro">${err.message}</span>`; }
+}
+['ot-n','ot-s','ot-o','ot-l'].forEach(id => $(id).oninput = resumoOT);
+$('ot-dem').onchange = resumoOT;
+resumoOT();
+
+$('ot-link').onclick = () => {
+  const saida = $('ot-saida');
+  try{
+    const u = urlOT();
+    navigator.clipboard?.writeText(u);
+    saida.innerHTML = `Endereço copiado. Cole numa aba nova, baixe o .tif e arraste aqui em cima.`
+      + `<br><a href="${u}" target="_blank" rel="noopener">abrir em outra aba</a>`;
+  }catch(err){ saida.innerHTML = `<span class="erro">${err.message}</span>`; }
+};
+
+$('ot-buscar').onclick = async () => {
+  const botao = $('ot-buscar'), saida = $('ot-saida');
+  const chave = $('ot-chave').value.trim();
+  if(!chave){ saida.innerHTML = '<span class="erro">Cole a chave de API primeiro.</span>'; return; }
+  try{ localStorage.setItem('ot-chave', chave); }catch(e){ /* sem armazenamento */ }
+
+  let u;
+  try{ u = urlOT(); }
+  catch(err){ saida.innerHTML = `<span class="erro">${err.message}</span>`; return; }
+
+  botao.disabled = true;
+  saida.textContent = 'buscando no OpenTopography…';
+  try{
+    const resp = await fetch(u);
+    if(!resp.ok){
+      const texto = (await resp.text()).slice(0, 300);
+      throw new Error(`o servidor respondeu ${resp.status}. ${texto}`);
+    }
+    const blob = await resp.blob();
+    if(blob.size < 2000){
+      throw new Error(`vieram só ${blob.size} bytes, o que costuma ser mensagem de erro, `
+        + `não raster. Confira a chave e a caixa de coordenadas.`);
+    }
+    saida.innerHTML = `<span class="bom">recebido: ${(blob.size/1e6).toFixed(1)} MB</span>`;
+    const arq = new File([blob], `${$('ot-dem').value}.tif`, {type:'image/tiff'});
+    await receberMDE(arq);
+  }catch(err){
+    saida.innerHTML =
+      `<span class="erro">Não consegui buscar daqui: ${err.message}</span><br>`
+    + `Isso normalmente é o navegador bloqueando a chamada entre sites (CORS), e não erro seu. `
+    + `O caminho alternativo dá no mesmo arquivo: `
+    + `<a href="${u}" target="_blank" rel="noopener">abra este endereço em outra aba</a>, `
+    + `salve o .tif e arraste na área acima.`;
+  }finally{ botao.disabled = false; }
+};
+
+/* ===========================================================================
+   USO DO SOLO LIDO DIRETO DA NUVEM
+
+   O GeoTIFF do MapBiomas fica num bucket público que aceita requisição por
+   faixa de bytes. Como o arquivo é tiled, dá para ler só os blocos que cobrem
+   a área de interesse, pela internet, sem baixar os gigabytes todos.
+
+   Depende de o servidor liberar leitura entre sites. Se não liberar, a página
+   avisa e a origem por arquivo continua valendo.
+   =========================================================================== */
+const URL_MAPBIOMAS = ano =>
+  'https://storage.googleapis.com/mapbiomas-public/initiatives/brasil/collection11'
++ `/lulc/coverage/brazil_coverage/brazil_coverage-col11_${ano}.tif`;
+
+(function montarAnos(){
+  const sel = $('uso-ano');
+  for(let ano = 2025; ano >= 1985; ano--){
+    const o = document.createElement('option');
+    o.value = ano; o.textContent = ano;
+    sel.appendChild(o);
+  }
+  sel.value = 2025;
+  $('uso-url').value = URL_MAPBIOMAS(2025);
+  sel.onchange = () => { $('uso-url').value = URL_MAPBIOMAS(sel.value); };
+})();
+
+$('uso-fonte').onchange = () => {
+  const porUrl = $('uso-fonte').value === 'url';
+  $('bloco-url').hidden = !porUrl;
+  $('bloco-arquivo').hidden = porUrl;
+  $('lb-ano').style.display = porUrl ? '' : 'none';
+};
+
+$('uso-conectar').onclick = async () => {
+  const botao = $('uso-conectar'), status = $('uso-status');
+  const url = $('uso-url').value.trim();
+  if(!url){ status.innerHTML = '<span class="erro">Cole o endereço do GeoTIFF.</span>'; return; }
+
+  botao.disabled = true;
+  status.textContent = 'lendo o cabeçalho do arquivo remoto…';
+  try{
+    const info = await abrirTIFF(url);
+    st.uso = info;
+    st.arqUso = { name: url.split('/').pop() || url };
+    const gp = info.lin*info.col/1e9;
+    status.innerHTML = `<span class="bom">conectado</span> · ${nBR(info.lin)} × ${nBR(info.col)} pixels`
+      + (gp >= 1 ? ` (${gp.toFixed(1)} bilhões)` : '')
+      + ` · EPSG:${info.epsg || '?'} · ${info.tiled ? 'tiled' : 'não tiled'}`
+      + `<br>Nada foi baixado: só os blocos da sua área serão lidos no processamento.`;
+    if(!info.tiled) status.innerHTML +=
+      `<br><span class="erro">Este arquivo não é tiled, então a leitura remota será muito `
+    + `lenta. Prefira baixar e usar a origem por arquivo.</span>`;
+  }catch(err){
+    st.uso = null;
+    status.innerHTML =
+      `<span class="erro">Não consegui ler pela internet: ${err.message || err}</span><br>`
+    + `Costuma ser o navegador bloqueando a leitura entre sites (CORS), e não erro seu. `
+    + `Troque a origem para "Arquivo no meu computador", baixe o .tif `
+    + `<a href="${url}" target="_blank" rel="noopener">por este endereço</a> e arraste aqui. `
+    + `O resultado é o mesmo, e o tamanho do arquivo continua não importando.`;
+  }finally{
+    botao.disabled = false;
+    atualizarBotao();
+  }
+};
 
 </script>
 </body>
