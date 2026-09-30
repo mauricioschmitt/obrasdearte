@@ -24,6 +24,10 @@
 :root[data-theme="dark"]{
   --papel:#16262B; --papel2:#0F1C20; --tinta:#DCE6E2; --fraca:#8FA7A0;
   --linha:rgba(220,230,226,.14); --campo:#1E3238; }
+/* O atributo hidden do HTML funciona por uma regra da folha do navegador,
+   que qualquer display: definido aqui sobrescreve. Sem este !important,
+   elemento com display próprio nunca some ao receber hidden. */
+[hidden]{display:none !important}
 *{box-sizing:border-box}
 html,body{height:100%;margin:0}
 body{font-family:var(--sans);color:var(--tinta);background:var(--barra);
