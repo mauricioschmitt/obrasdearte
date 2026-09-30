@@ -49,6 +49,8 @@ main{display:grid;grid-template-columns:1fr 25rem;min-height:0}
 .legenda{position:absolute;left:.7rem;bottom:.7rem;background:rgba(232,234,228,.93);
   color:#1B3A34;border-radius:2px;padding:.5rem .6rem;font-size:.7rem;line-height:1.5;max-width:11rem}
 .legenda i{display:inline-block;width:.62rem;height:.62rem;margin-right:.35rem;vertical-align:-1px}
+.escala{position:absolute;right:.7rem;bottom:.7rem;background:rgba(232,234,228,.93);color:#1B3A34;
+  border-radius:2px;padding:.28rem .5rem;font-family:var(--mono);font-size:.68rem}
 .estado{position:absolute;inset:0;display:grid;place-content:center;text-align:center;
   padding:2rem;color:var(--tinta);font-size:.9rem;line-height:1.6;background:var(--papel2)}
 .estado b{display:block;font-size:1.05rem;margin-bottom:.4rem}
@@ -111,6 +113,7 @@ a{color:var(--agua)}
     <button id="bt-relevo" aria-pressed="true">Relevo</button>
     <button id="bt-uso" aria-pressed="false">Uso do solo</button>
     <button id="bt-ruas" aria-pressed="false" style="margin-left:.5rem">Ruas</button>
+    <button id="bt-ajustar" style="margin-left:.5rem">Ajustar</button>
   </div>
 </header>
 
@@ -118,6 +121,7 @@ a{color:var(--agua)}
   <div class="mapa">
     <canvas id="tela"></canvas>
     <div class="legenda" id="legenda" hidden></div>
+    <div class="escala" id="escala"></div>
     <div class="estado" id="estado"><b>Carregando</b>preparando o grafo de fluxo…</div>
   </div>
   <aside>
@@ -524,7 +528,7 @@ function zoomAdequado(){
   // O zoom tem que acompanhar o que a TELA mostra, não o tamanho da célula:
   // a grade quase sempre aparece ampliada, e escolher pela célula deixaria a
   // rua borrada e sem nome legível.
-  const metrosPorPixel = Math.max(4, G.cel/Math.max(vista.esc, 0.05));
+  const metrosPorPixel = Math.max(0.8, G.cel/Math.max(vista.esc, 0.05));
   const z = Math.log2(2*MUNDO*Math.cos(lat*Math.PI/180)/(256*metrosPorPixel));
   return Math.max(8, Math.min(18, Math.round(z)));
 }
@@ -553,8 +557,16 @@ function desenharRuas(){
   if(!T) return;
   const z = zoomAdequado(), S = 2*MUNDO/Math.pow(2,z), n = Math.pow(2,z);
 
+  // Só a parte visível: com zoom, pedir a região inteira estouraria o limite
+  // de tiles e o mapa ficaria sem rua nenhuma justamente quando mais precisa.
+  const vj0 = Math.max(0, Math.floor((0 - vista.ox)/vista.esc));
+  const vj1 = Math.min(G.col-1, Math.ceil((tela.width - vista.ox)/vista.esc));
+  const vi0 = Math.max(0, Math.floor((0 - vista.oy)/vista.esc));
+  const vi1 = Math.min(G.lin-1, Math.ceil((tela.height - vista.oy)/vista.esc));
+  if(vj1 < vj0 || vi1 < vi0) return;
+
   let xmin=Infinity, xmax=-Infinity, ymin=Infinity, ymax=-Infinity;
-  for(let i of [0, G.lin-1]) for(let j of [0, G.col-1]){
+  for(let i of [vi0, vi1]) for(let j of [vj0, vj1]){
     const [lon,lat] = G.paraLonLat(i,j);
     const [mx,my] = paraMercator(lon,lat);
     xmin=Math.min(xmin,mx); xmax=Math.max(xmax,mx);
@@ -627,15 +639,51 @@ function pintarBase(){
   bctx.putImageData(img,0,0);
 }
 
+let escBase=1, mexeu=false;
+
+function ajustar(){
+  escBase=Math.min(tela.width/G.col, tela.height/G.lin);
+  vista={esc:escBase, ox:(tela.width-G.col*escBase)/2, oy:(tela.height-G.lin*escBase)/2};
+  mexeu=false;
+}
+
 function redimensionar(){
   const cx=tela.parentElement.getBoundingClientRect();
   const dpr=Math.min(window.devicePixelRatio||1,2);
+  const antes={l:tela.width, a:tela.height};
   tela.width=cx.width*dpr; tela.height=cx.height*dpr;
   tela.style.width=cx.width+'px'; tela.style.height=cx.height+'px';
   if(!G.lin) return;
-  const esc=Math.min(tela.width/G.col, tela.height/G.lin);
-  vista={esc, ox:(tela.width-G.col*esc)/2, oy:(tela.height-G.lin*esc)/2};
+  if(!mexeu) ajustar();
+  else{
+    // mantém no centro o que estava no centro antes de redimensionar
+    vista.ox += (tela.width-antes.l)/2;
+    vista.oy += (tela.height-antes.a)/2;
+    escBase=Math.min(tela.width/G.col, tela.height/G.lin);
+  }
   desenhar();
+}
+
+const LIM_ZOOM=[0.8, 60];
+
+function aplicarZoom(px, py, fator){
+  const novo=Math.max(escBase*LIM_ZOOM[0], Math.min(escBase*LIM_ZOOM[1], vista.esc*fator));
+  if(novo===vista.esc) return;
+  const k=novo/vista.esc;
+  vista.ox = px-(px-vista.ox)*k;
+  vista.oy = py-(py-vista.oy)*k;
+  vista.esc = novo;
+  mexeu=true;
+  desenhar();
+  atualizarEscala();
+}
+
+function atualizarEscala(){
+  const el=$('escala');
+  const larg=tela.getBoundingClientRect().width;
+  if(!el||!G.cel||!larg||!vista.esc) return;
+  const mpp=G.cel/vista.esc*(tela.width/larg);
+  el.textContent = `${(vista.esc/escBase).toFixed(1)}× · ${mpp.toFixed(1)} m/pixel`;
 }
 
 function desenhar(){
@@ -846,17 +894,97 @@ function ligar(e,Tc,i,R,H,Q,obra,metodo,lat,lon){
 /* ===========================================================================
    INTERAÇÃO E PARTIDA
    =========================================================================== */
-tela.addEventListener('click', ev=>{
+/* ---------------------------------------------------------------------------
+   Roda para aproximar, arrastar para deslocar, dois dedos para pinçar.
+
+   O clique que delimita a bacia e o arrasto que move o mapa saem do mesmo
+   gesto, então a distinção é pelo deslocamento: menos de 5 pixels conta como
+   clique. Sem isso, todo arrasto delimitaria uma bacia indesejada no fim.
+   --------------------------------------------------------------------------- */
+const LIMIAR_CLIQUE = 5;
+const ponteiros = new Map();
+let arrasto = null, pinca = null;
+
+const emTela = ev => {
+  const r = tela.getBoundingClientRect(), dpr = tela.width/r.width;
+  return [ (ev.clientX-r.left)*dpr, (ev.clientY-r.top)*dpr ];
+};
+
+tela.addEventListener('wheel', ev => {
   if(!G.lin) return;
-  const r=tela.getBoundingClientRect(), dpr=tela.width/r.width;
-  const j=Math.floor(((ev.clientX-r.left)*dpr-vista.ox)/vista.esc);
-  const i=Math.floor(((ev.clientY-r.top )*dpr-vista.oy)/vista.esc);
-  if(i<0||j<0||i>=G.lin||j>=G.col) return;
-  const [ai,aj]=ancorar(i,j);
-  exutorio=ai*G.col+aj;
-  bacia={celulas:delimitar(exutorio), desloc:G.cel*Math.hypot(ai-i,aj-j)};
-  pintarBase(); desenhar(); calcular();
+  ev.preventDefault();
+  const [px,py] = emTela(ev);
+  const passo = ev.deltaMode === 1 ? 18 : 1;           // linhas ou pixels
+  aplicarZoom(px, py, Math.exp(-ev.deltaY*passo*0.0016));
+}, {passive:false});
+
+tela.addEventListener('pointerdown', ev => {
+  if(!G.lin) return;
+  tela.setPointerCapture(ev.pointerId);
+  ponteiros.set(ev.pointerId, emTela(ev));
+  if(ponteiros.size === 1){
+    const [px,py] = ponteiros.get(ev.pointerId);
+    arrasto = {px, py, ox:vista.ox, oy:vista.oy, andou:0};
+    tela.style.cursor = 'grabbing';
+  }else if(ponteiros.size === 2){
+    const [a,b] = [...ponteiros.values()];
+    pinca = { dist:Math.hypot(a[0]-b[0], a[1]-b[1]) };
+    arrasto = null;
+  }
 });
+
+tela.addEventListener('pointermove', ev => {
+  if(!ponteiros.has(ev.pointerId)) return;
+  ponteiros.set(ev.pointerId, emTela(ev));
+
+  if(pinca && ponteiros.size === 2){
+    const [a,b] = [...ponteiros.values()];
+    const dist = Math.hypot(a[0]-b[0], a[1]-b[1]);
+    if(pinca.dist > 0 && dist > 0){
+      aplicarZoom((a[0]+b[0])/2, (a[1]+b[1])/2, dist/pinca.dist);
+      pinca.dist = dist;
+    }
+    return;
+  }
+  if(!arrasto) return;
+  const [px,py] = ponteiros.get(ev.pointerId);
+  arrasto.andou = Math.max(arrasto.andou, Math.hypot(px-arrasto.px, py-arrasto.py));
+  vista.ox = arrasto.ox + (px-arrasto.px);
+  vista.oy = arrasto.oy + (py-arrasto.py);
+  mexeu = true;
+  desenhar();
+});
+
+function encerrar(ev){
+  const era = ponteiros.get(ev.pointerId);
+  ponteiros.delete(ev.pointerId);
+  if(ponteiros.size < 2) pinca = null;
+  tela.style.cursor = 'crosshair';
+
+  if(arrasto && era && arrasto.andou < LIMIAR_CLIQUE) delimitarEm(era[0], era[1]);
+  if(ponteiros.size === 0) arrasto = null;
+}
+tela.addEventListener('pointerup', encerrar);
+tela.addEventListener('pointercancel', ev => {
+  ponteiros.delete(ev.pointerId);
+  arrasto = null; pinca = null;
+  tela.style.cursor = 'crosshair';
+});
+
+function delimitarEm(px, py){
+  const j = Math.floor((px-vista.ox)/vista.esc);
+  const i = Math.floor((py-vista.oy)/vista.esc);
+  if(i<0||j<0||i>=G.lin||j>=G.col) return;
+  // Com zoom grande o usuário mira o pixel certo, então a ancoragem não
+  // precisa procurar tão longe e deixa de roubar o clique para outro canal.
+  const raio = vista.esc > escBase*6 ? 2 : 5;
+  const [ai,aj] = ancorar(i, j, raio);
+  exutorio = ai*G.col+aj;
+  bacia = {celulas:delimitar(exutorio), desloc:G.cel*Math.hypot(ai-i, aj-j)};
+  pintarBase(); desenhar(); calcular();
+}
+
+$('bt-ajustar').onclick = () => { ajustar(); desenhar(); atualizarEscala(); };
 
 const trocar=c=>{ camada=c;
   $('bt-relevo').setAttribute('aria-pressed', c==='relevo');
@@ -893,7 +1021,7 @@ async function abrir(ref){
 
     fase('Preparando', `${tam}<br>desenhando o mapa…`);
     await new Promise(r => setTimeout(r));
-    pintarBase(); redimensionar(); legenda(); painelVazio();
+    pintarBase(); redimensionar(); legenda(); painelVazio(); atualizarEscala();
     painel.hidden = true;
 
     $('rodape').innerHTML = (ref===null
