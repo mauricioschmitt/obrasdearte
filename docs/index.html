@@ -189,35 +189,77 @@ async function listarRegioes(){
   return null;
 }
 
+/* Busca com relógio e com progresso.
+
+   Requisição parada é o que trava para sempre sem dar erro: fica esperando
+   uma resposta que nunca vem. Aqui, se passarem 25 s sem chegar um byte
+   novo, a busca é cancelada e vira mensagem legível. */
+async function buscar(url, fase, rotulo){
+  const ctrl = new AbortController();
+  let relogio = setTimeout(() => ctrl.abort(), 25000);
+  const adiar = () => { clearTimeout(relogio); relogio = setTimeout(() => ctrl.abort(), 25000); };
+
+  let resp;
+  try{
+    resp = await fetch(url, {signal:ctrl.signal, cache:'no-cache'});
+  }catch(e){
+    clearTimeout(relogio);
+    throw new Error(e.name === 'AbortError'
+      ? `O servidor não respondeu em 25 s ao pedir ${url}. Recarregue a página; se `
+      + `insistir, confira se a publicação do GitHub Pages terminou.`
+      : `Falha de rede ao pedir ${url}.`);
+  }
+  if(!resp.ok){ clearTimeout(relogio); return {status:resp.status, dados:null}; }
+
+  const total = +resp.headers.get('content-length') || 0;
+  const leitor = resp.body && resp.body.getReader ? resp.body.getReader() : null;
+  if(!leitor){ clearTimeout(relogio); return {status:200, dados:await resp.arrayBuffer()}; }
+
+  const partes = []; let lido = 0;
+  try{
+    for(;;){
+      const {done, value} = await leitor.read();
+      if(done) break;
+      adiar();
+      partes.push(value); lido += value.length;
+      if(fase) fase('Carregando', `${rotulo}<br>${(lido/1024).toFixed(0)} KB`
+        + (total ? ` de ${(total/1024).toFixed(0)} KB` : ''));
+    }
+  }catch(e){
+    throw new Error(`O download de ${url} parou no meio, depois de `
+      + `${(lido/1024).toFixed(0)} KB. Recarregue a página.`);
+  }finally{ clearTimeout(relogio); }
+
+  const juntas = new Uint8Array(lido); let off = 0;
+  for(const p of partes){ juntas.set(p, off); off += p.length; }
+  return {status:200, dados:juntas.buffer};
+}
+
 /* Baixa o raster da região, tolerando duas coisas que acontecem na prática:
    o navegador ter descompactado o .gz sozinho na hora do download (Safari faz
    isso), e o servidor devolver uma página HTML de erro no lugar do arquivo. */
-async function baixarRaster(nome){
+async function baixarRaster(nome, fase, rotulo){
   const tentativas = [nome];
   if(nome.endsWith('.gz')) tentativas.push(nome.slice(0, -3));
   const falhas = [];
 
   for(const alvo of tentativas){
-    let resp;
-    try{ resp = await fetch('dados/' + alvo); }
-    catch(e){ falhas.push(`${alvo}: rede indisponível`); continue; }
-    if(!resp.ok){ falhas.push(`${alvo}: ${resp.status}`); continue; }
-
-    const ab = await resp.arrayBuffer();
+    const r = await buscar('dados/' + alvo, fase, rotulo);
+    if(!r.dados){ falhas.push(`${alvo}: ${r.status}`); continue; }
     const inicio = new TextDecoder()
-      .decode(new Uint8Array(ab, 0, Math.min(200, ab.byteLength))).toLowerCase();
+      .decode(new Uint8Array(r.dados, 0, Math.min(200, r.dados.byteLength))).toLowerCase();
     if(inicio.includes('<!doctype') || inicio.includes('<html')){
       falhas.push(`${alvo}: veio uma página HTML no lugar do arquivo`);
       continue;
     }
-    return await descomprimir(ab);
+    if(fase) fase('Carregando', `${rotulo}<br>descomprimindo…`);
+    await new Promise(r2 => setTimeout(r2));
+    return await descomprimir(r.dados);
   }
 
   throw new Error(
     `Não achei o raster da região. Tentei ${falhas.join('; ')}. `
-  + `Confira se o arquivo "${nome}" está em docs/dados/ no repositório, com esse nome exato. `
-  + `Se o seu navegador salvou como "${nome.replace(/\.gz$/,'')}", renomeie de volta ou `
-  + `suba com o nome sem .gz e corrija o campo "bin" no arquivo .json da região.`);
+  + `Confira se o arquivo "${nome}" está em docs/dados/ no repositório, com esse nome exato.`);
 }
 
 async function carregarRegiao(ref, fase){
@@ -226,12 +268,11 @@ async function carregarRegiao(ref, fase){
     return { meta: D.meta, mde: b64(D.mde,Int16Array),
              d8: b64(D.d8,Uint8Array), uso: b64(D.uso,Uint8Array) };
   }
-  const resp = await fetch('dados/'+ref.meta, {cache:'no-cache'});
-  if(!resp.ok) throw new Error(
-    `Não achei dados/${ref.meta} (erro ${resp.status}). Confira se o arquivo subiu.`);
-  const meta = await resp.json();
-  if(fase) fase('Carregando', `${meta.nome}<br>baixando o raster…`);
-  const buf  = await baixarRaster(meta.bin);
+  const r = await buscar('dados/'+ref.meta, fase, ref.nome);
+  if(!r.dados) throw new Error(
+    `Não achei dados/${ref.meta} (erro ${r.status}). Confira se o arquivo subiu.`);
+  const meta = JSON.parse(new TextDecoder().decode(r.dados));
+  const buf  = await baixarRaster(meta.bin, fase, meta.nome);
   const n = meta.lin*meta.col;
   if(buf.byteLength < n*4) throw new Error(
     `O arquivo ${meta.bin} tem ${buf.byteLength.toLocaleString('pt-BR')} bytes, mas a região `
