@@ -189,17 +189,55 @@ async function listarRegioes(){
   return null;
 }
 
-async function carregarRegiao(ref){
+/* Baixa o raster da região, tolerando duas coisas que acontecem na prática:
+   o navegador ter descompactado o .gz sozinho na hora do download (Safari faz
+   isso), e o servidor devolver uma página HTML de erro no lugar do arquivo. */
+async function baixarRaster(nome){
+  const tentativas = [nome];
+  if(nome.endsWith('.gz')) tentativas.push(nome.slice(0, -3));
+  const falhas = [];
+
+  for(const alvo of tentativas){
+    let resp;
+    try{ resp = await fetch('dados/' + alvo); }
+    catch(e){ falhas.push(`${alvo}: rede indisponível`); continue; }
+    if(!resp.ok){ falhas.push(`${alvo}: ${resp.status}`); continue; }
+
+    const ab = await resp.arrayBuffer();
+    const inicio = new TextDecoder()
+      .decode(new Uint8Array(ab, 0, Math.min(200, ab.byteLength))).toLowerCase();
+    if(inicio.includes('<!doctype') || inicio.includes('<html')){
+      falhas.push(`${alvo}: veio uma página HTML no lugar do arquivo`);
+      continue;
+    }
+    return await descomprimir(ab);
+  }
+
+  throw new Error(
+    `Não achei o raster da região. Tentei ${falhas.join('; ')}. `
+  + `Confira se o arquivo "${nome}" está em docs/dados/ no repositório, com esse nome exato. `
+  + `Se o seu navegador salvou como "${nome.replace(/\.gz$/,'')}", renomeie de volta ou `
+  + `suba com o nome sem .gz e corrija o campo "bin" no arquivo .json da região.`);
+}
+
+async function carregarRegiao(ref, fase){
   if(ref === null){                                  // demonstração embutida
     const D = JSON.parse($('demo').textContent);
     return { meta: D.meta, mde: b64(D.mde,Int16Array),
              d8: b64(D.d8,Uint8Array), uso: b64(D.uso,Uint8Array) };
   }
-  const meta = await (await fetch('dados/'+ref.meta, {cache:'force-cache'})).json();
-  const buf  = await descomprimir(await (await fetch('dados/'+meta.bin)).arrayBuffer());
+  const resp = await fetch('dados/'+ref.meta, {cache:'no-cache'});
+  if(!resp.ok) throw new Error(
+    `Não achei dados/${ref.meta} (erro ${resp.status}). Confira se o arquivo subiu.`);
+  const meta = await resp.json();
+  if(fase) fase('Carregando', `${meta.nome}<br>baixando o raster…`);
+  const buf  = await baixarRaster(meta.bin);
   const n = meta.lin*meta.col;
-  if(buf.byteLength < n*4)
-    throw new Error(`Arquivo ${meta.bin} tem ${buf.byteLength} bytes, esperado ${n*4}.`);
+  if(buf.byteLength < n*4) throw new Error(
+    `O arquivo ${meta.bin} tem ${buf.byteLength.toLocaleString('pt-BR')} bytes, mas a região `
+  + `declara ${meta.lin} × ${meta.col} células, que precisam de `
+  + `${(n*4).toLocaleString('pt-BR')}. O arquivo provavelmente subiu incompleto ou corrompido: `
+  + `apague e suba de novo, arrastando direto da pasta de downloads.`);
   return { meta,
     mde: new Int16Array(buf, 0, n),
     d8:  new Uint8Array(buf, n*2, n),
@@ -209,49 +247,68 @@ async function carregarRegiao(ref){
 /* ===========================================================================
    GRAFO DE FLUXO (montado no navegador, uma vez por região)
    =========================================================================== */
-function montarGrafo(d){
+const respirar = () => new Promise(r => setTimeout(r));
+
+/* Montagem do grafo em etapas, cedendo o controle ao navegador entre elas.
+   Numa região grande isso é a diferença entre ver o progresso andando e ver
+   a aba congelada sem explicação. */
+async function montarGrafo(d, aviso){
   const {lin, col} = d.meta, n = lin*col;
   Object.assign(G, {lin, col, n, cel:d.meta.celula, meta:d.meta,
                     mde:d.mde, d8:d.d8, uso:d.uso});
 
-  const receptor = new Int32Array(n).fill(-1);
-  for(let k=0;k<n;k++){
-    const dir = d.d8[k]; if(!dir) continue;
-    const [di,dj] = DESL[dir-1];
-    const i=(k/col)|0, j=k%col, vi=i+di, vj=j+dj;
-    if(vi<0||vj<0||vi>=lin||vj>=col) continue;
-    receptor[k] = vi*col+vj;
-  }
+  const passo = 400000;                       // células entre respiros
+  const etapa = async (texto, fn) => { aviso(texto); await respirar(); return fn(); };
 
-  const acc = new Float32Array(n).fill(1);
-  const grau = new Int32Array(n);
-  for(let k=0;k<n;k++) if(receptor[k]>=0) grau[receptor[k]]++;
-  const pilha = new Int32Array(n); let t=0;
-  for(let k=0;k<n;k++) if(grau[k]===0) pilha[t++]=k;
-  while(t>0){
-    const k=pilha[--t], r=receptor[k];
-    if(r<0) continue;
-    acc[r]+=acc[k];
-    if(--grau[r]===0) pilha[t++]=r;
-  }
+  const receptor = await etapa('direções de fluxo', () => {
+    const r = new Int32Array(n).fill(-1);
+    for(let k=0;k<n;k++){
+      const dir = d.d8[k]; if(!dir) continue;
+      const [di,dj] = DESL[dir-1];
+      const i=(k/col)|0, j=k%col, vi=i+di, vj=j+dj;
+      if(vi<0||vj<0||vi>=lin||vj>=col) continue;
+      r[k] = vi*col+vj;
+    }
+    return r;
+  });
 
-  const inicio = new Int32Array(n+1), doadores = new Int32Array(n);
-  for(let k=0;k<n;k++) if(receptor[k]>=0) inicio[receptor[k]+1]++;
-  for(let k=0;k<n;k++) inicio[k+1]+=inicio[k];
-  const cursor = inicio.slice(0,n);
-  for(let k=0;k<n;k++){ const r=receptor[k]; if(r>=0) doadores[cursor[r]++]=k; }
+  const acc = await etapa('acumulação', () => {
+    const a = new Float32Array(n).fill(1);
+    const grau = new Int32Array(n);
+    for(let k=0;k<n;k++) if(receptor[k]>=0) grau[receptor[k]]++;
+    const pilha = new Int32Array(n); let t=0;
+    for(let k=0;k<n;k++) if(grau[k]===0) pilha[t++]=k;
+    while(t>0){
+      const k=pilha[--t], r=receptor[k];
+      if(r<0) continue;
+      a[r]+=a[k];
+      if(--grau[r]===0) pilha[t++]=r;
+    }
+    return a;
+  });
 
+  const [inicio, doadores] = await etapa('grafo invertido', () => {
+    const ini = new Int32Array(n+1), doa = new Int32Array(n);
+    for(let k=0;k<n;k++) if(receptor[k]>=0) ini[receptor[k]+1]++;
+    for(let k=0;k<n;k++) ini[k+1]+=ini[k];
+    const cursor = ini.slice(0,n);
+    for(let k=0;k<n;k++){ const r=receptor[k]; if(r>=0) doa[cursor[r]++]=k; }
+    return [ini, doa];
+  });
+
+  aviso('declividades');
   const declive = new Float32Array(n);
-  for(let i=0;i<lin;i++) for(let j=0;j<col;j++){
-    const i0=Math.max(0,i-1), i1=Math.min(lin-1,i+1);
-    const j0=Math.max(0,j-1), j1=Math.min(col-1,j+1);
-    const gy=(d.mde[i1*col+j]-d.mde[i0*col+j])/((i1-i0)*G.cel);
-    const gx=(d.mde[i*col+j1]-d.mde[i*col+j0])/((j1-j0)*G.cel);
-    declive[i*col+j]=Math.hypot(gx,gy);
+  for(let i=0;i<lin;i++){
+    for(let j=0;j<col;j++){
+      const i0=Math.max(0,i-1), i1=Math.min(lin-1,i+1);
+      const j0=Math.max(0,j-1), j1=Math.min(col-1,j+1);
+      const gy=(d.mde[i1*col+j]-d.mde[i0*col+j])/((i1-i0)*G.cel);
+      const gx=(d.mde[i*col+j1]-d.mde[i*col+j0])/((j1-j0)*G.cel);
+      declive[i*col+j]=Math.hypot(gx,gy);
+    }
+    if((i*col) % passo < col) await respirar();
   }
 
-  /* Limiar de canal: 1 % da acumulação máxima, com piso, para o mapa não
-     virar uma teia em relevo suave nem sumir em recorte pequeno. */
   let accMax=0; for(let k=0;k<n;k++) if(acc[k]>accMax) accMax=acc[k];
   Object.assign(G, {receptor, acc, inicio, doadores, declive,
     limiar: Math.max(60, Math.min(accMax*0.01, 4000)),
@@ -642,17 +699,32 @@ $('bt-uso').onclick=()=>trocar('uso');
 window.addEventListener('resize', redimensionar);
 
 async function abrir(ref){
-  $('estado').hidden=false;
-  $('estado').innerHTML='<div><b>Carregando</b>montando o grafo de fluxo…</div>';
+  const painel = $('estado');
+  painel.hidden = false;
+  const fase = (t, extra='') => {
+    painel.innerHTML = `<div><b>${t}</b>${extra}</div>`;
+  };
+  fase('Carregando', 'buscando os dados da região…');
   bacia=null; exutorio=null;
+
   try{
-    const d=await carregarRegiao(ref);
-    montarGrafo(d);
+    const d = await carregarRegiao(ref, fase);
+    const n = d.meta.lin*d.meta.col;
+    const tam = `${d.meta.lin} × ${d.meta.col} = ${n.toLocaleString('pt-BR')} células`;
+    if(n > 6e6) fase('Região grande',
+      `${tam}.<br>Pode levar um minuto e consumir bastante memória.<br>`
+    + `Se travar, gere a região de novo com célula maior ou recorte menor.`);
+
+    await montarGrafo(d, etapa => fase('Preparando', `${tam}<br>${etapa}…`));
+
+    fase('Preparando', `${tam}<br>desenhando o mapa…`);
+    await new Promise(r => setTimeout(r));
     pintarBase(); redimensionar(); legenda(); painelVazio();
-    $('estado').hidden=true;
+    painel.hidden = true;
+
     $('rodape').innerHTML = (ref===null
       ? 'Dados de <b>demonstração</b>, relevo sintético. Instale uma região real na pasta <code>dados/</code>.<br>'
-      : `Região: ${G.meta.nome} · célula ${G.cel} m · ${G.lin}×${G.col}<br>`)
+      : `Região: ${G.meta.nome} · célula ${G.cel} m · ${tam}<br>`)
       + 'Pré-dimensionamento. Não substitui projeto executivo nem dispensa responsável técnico com ART.';
   }catch(err){
     aviso("Não foi possível abrir esta região", String(err.message||err));
