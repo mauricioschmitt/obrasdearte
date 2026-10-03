@@ -43,14 +43,34 @@ que você subiu antes, então dá para ir acrescentando uma por vez.
 
 ### Onde baixar os dados sem QGIS
 
-**Modelo de elevação.** O OpenTopography tem uma interface web onde você
-desenha o retângulo no mapa, escolhe o Copernicus GLO-30 e baixa um GeoTIFF.
-Vem em graus, e tudo bem: a página de preparo reprojeta. O FABDEM tende a
-ser melhor em SC porque remove vegetação, e a Mata Atlântica introduz vários
-metros de erro em MDE de satélite bruto; confira a licença.
+**Modelo de elevação.** A página busca direto na API do OpenTopography:
+abra "Buscar direto do OpenTopography", cole a chave de API gratuita (sai no
+cadastro deles, em "MyOpenTopo"), informe a caixa de coordenadas e clique em
+buscar. O arquivo entra no fluxo sem download manual.
 
-**Uso e cobertura.** MapBiomas, pela área de downloads do site deles, que
-oferece recortes por estado e por município.
+Se o navegador bloquear a chamada entre sites, o que é comum e não é erro
+seu, a página mostra o endereço pronto: abra em outra aba, salve o .tif e
+arraste. Dá no mesmo arquivo.
+
+**A chave de API é sua e é secreta.** Ela fica guardada só no navegador de
+quem digitou. Não escreva a chave dentro do `preparar.html` antes de publicar
+no GitHub: o repositório é público e qualquer um gastaria a sua cota.
+
+Baixe só a área de interesse, porque o MDE é lido inteiro para desenhar a
+prévia do relevo. O limite é 90 milhões de pixels, e a página mostra a conta
+enquanto você mexe nas coordenadas.
+
+**Uso e cobertura.** Na página de downloads do MapBiomas, pegue a
+"Cobertura do Brasil" em GeoTIFF. **Sim, o arquivo do Brasil inteiro.**
+Não precisa recortar: a página lê apenas a janela que cobre o seu MDE.
+Num teste, ela leu 1,36 % do arquivo e o resultado foi idêntico ao de ler
+tudo. Baixe uma vez e use para todas as regiões, para sempre.
+
+Se o download for grande demais para a sua conexão, a alternativa é a
+**ESA WorldCover**, em tiles de 3° que baixam em dois cliques. Escolha a
+legenda correspondente no seletor da página. Ela não separa pastagem de
+campo natural nem enxerga silvicultura, então o CN fica mais grosseiro; use
+para destravar e troque pelo MapBiomas quando der.
 
 Não tenho acesso a busca, então confirme endereços, licenças e formatos
 antes de fechar o plano de dados.
