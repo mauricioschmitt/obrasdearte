@@ -4,6 +4,11 @@
    "id": "mafra-sc",
    "nome": "Mafra - SC",
    "meta": "mafra-sc.json"
+  },
+  {
+   "id": "sao-bento",
+   "nome": "Sao Bento do Sul",
+   "meta": "sao-bento.json"
   }
  ]
 }

@@ -1,0 +1,25 @@
+{
+ "id": "sao-bento",
+ "nome": "Sao Bento do Sul",
+ "lin": 754,
+ "col": 1184,
+ "celula": 30,
+ "origem": [
+  647730.2825521112,
+  7106123.150484008
+ ],
+ "proj4": "+proj=utm +zone=22 +south +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs",
+ "epsg": 31982,
+ "idf": {
+  "K": 1000,
+  "a": 0.15,
+  "b": 10,
+  "c": 0.75
+ },
+ "bin": "sao-bento.bin.gz",
+ "fonte": {
+  "mde": "output_hh.tif",
+  "uso": "brazil_coverage-col11_2025.tif",
+  "gerado_em": "2026-10-03"
+ }
+}
