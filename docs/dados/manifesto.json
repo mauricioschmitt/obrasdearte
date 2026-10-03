@@ -6,6 +6,11 @@
    "meta": "mafra-sc.json"
   },
   {
+   "id": "mafra-2m",
+   "nome": "Mafra 2m",
+   "meta": "mafra-2m.json"
+  },
+  {
    "id": "sao-bento",
    "nome": "Sao Bento do Sul",
    "meta": "sao-bento.json"
