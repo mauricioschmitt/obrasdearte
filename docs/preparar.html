@@ -20,10 +20,6 @@
 @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
   --papel:#16262B; --papel2:#0F1C20; --tinta:#DCE6E2; --fraca:#8FA7A0;
   --linha:rgba(220,230,226,.16); --campo:#1E3238; }}
-/* O atributo hidden do HTML funciona por uma regra da folha do navegador,
-   que qualquer display: definido aqui sobrescreve. Sem este !important,
-   elemento com display próprio nunca some ao receber hidden. */
-[hidden]{display:none !important}
 *{box-sizing:border-box}
 html,body{height:100%;margin:0}
 body{font-family:var(--sans);color:var(--tinta);background:var(--papel2);
@@ -92,12 +88,13 @@ Não precisa de QGIS, de Python nem de servidor, e nada sai do seu computador.</
 
 <div class="passo">
   <h2><em>1</em>Modelo de elevação</h2>
-  <p>GeoTIFF de qualquer fonte. Pode estar em graus: a página reprojeta sozinha
-  para UTM, detectando a zona pela longitude. Não precisa passar pelo QGIS.</p>
+  <p>GeoTIFF de qualquer fonte. Pode estar em graus, que a página reprojeta sozinha para
+  UTM. E pode ser mais de um arquivo: selecione todas as folhas do SIGSC de uma vez e ela
+  monta o mosaico. Se as folhas vierem com .tfw, selecione-os junto.</p>
   <div class="solta" id="solta-mde" tabindex="0" role="button">
-    <b>Solte o MDE aqui</b><span>ou clique para escolher · .tif</span>
+    <b>Solte o MDE aqui</b><span>uma ou várias folhas · .tif, com os .tfw junto se houver</span>
   </div>
-  <input type="file" id="arq-mde" accept=".tif,.tiff" hidden>
+  <input type="file" id="arq-mde" accept=".tif,.tiff,.tfw" multiple hidden>
 
   <details id="api-ot" style="margin-top:.9rem">
     <summary>Buscar direto do OpenTopography, sem baixar à mão</summary>
@@ -143,8 +140,16 @@ Não precisa de QGIS, de Python nem de servidor, e nada sai do seu computador.</
     <div class="linha-ctrl">
       <button class="secundaria" id="bt-tudo">Usar a área inteira</button>
       <label style="flex-direction:row;align-items:center;gap:.4rem">
-        Resolução <input id="c-celula" type="number" value="30" min="5" step="5"
+        Resolução <input id="c-celula" type="number" value="30" min="1" step="1"
           style="width:5rem"> m
+      </label>
+      <label id="lb-crs" hidden style="flex-direction:row;align-items:center;gap:.4rem">
+        CRS das folhas
+        <select id="c-crs">
+          <option value="31982" selected>SIRGAS 2000 / UTM 22S (SC)</option>
+          <option value="31983">SIRGAS 2000 / UTM 23S</option>
+          <option value="31981">SIRGAS 2000 / UTM 21S</option>
+        </select>
       </label>
     </div>
     <div id="resumo" class="resumo"></div>
@@ -385,15 +390,48 @@ function reamostrarMDE(origem, alvo, transformar, semDado, passo=16){
 }
 
 /* --- 3. Alinhamento do uso do solo sobre a grade do MDE -------------------
-   Vizinho mais próximo: classe temática nunca pode ser interpolada. */
+   Classe temática nunca pode ser interpolada, então o valor sai por amostragem.
+
+   Quando o uso do solo é MAIS FINO que a grade de saída, tomar um pixel só por
+   célula desperdiça o dado e ainda sorteia a classe pelo que calhou de estar no
+   centro. Aqui a célula é varrida numa sub-malha e fica a classe dominante.
+   Com uso a 10 m e grade a 30 m são 9 amostras por célula em vez de 1. */
+function fatorSubamostra(alvo, m, passo){
+  const i=alvo.lin/2, j=alvo.col/2;
+  const [u0,v0]=posicaoNaOrigem(m, i, j, passo);
+  const [u1,v1]=posicaoNaOrigem(m, i+1, j+1, passo);
+  const pixelsPorCelula=Math.max(Math.abs(u1-u0), Math.abs(v1-v0));
+  return Math.max(1, Math.min(5, Math.round(pixelsPorCelula)));
+}
+
 function alinharUso(alvo, origem, transformar, passo=16){
   const {lin,col}=alvo, saida=new Int32Array(lin*col);
   const m=malhaGrossa(alvo, origem, transformar, passo);
-  for(let i=0;i<lin;i++) for(let j=0;j<col;j++){
+  const k=fatorSubamostra(alvo, m, passo);
+
+  const amostrar=(i,j)=>{
     const [u,v]=posicaoNaOrigem(m,i,j,passo);
     const uu=Math.round(u-0.5), vv=Math.round(v-0.5);
-    saida[i*col+j] = (uu>=0 && vv>=0 && uu<origem.col && vv<origem.lin)
+    return (uu>=0 && vv>=0 && uu<origem.col && vv<origem.lin)
       ? origem.dados[vv*origem.col+uu] : 0;
+  };
+
+  if(k===1){
+    for(let i=0;i<lin;i++) for(let j=0;j<col;j++) saida[i*col+j]=amostrar(i,j);
+    return saida;
+  }
+
+  const conta=new Map();
+  for(let i=0;i<lin;i++) for(let j=0;j<col;j++){
+    conta.clear();
+    let melhor=0, qtd=0;
+    for(let a=0;a<k;a++) for(let b=0;b<k;b++){
+      const c=amostrar(i+(a+0.5)/k-0.5, j+(b+0.5)/k-0.5);
+      const q=(conta.get(c)||0)+1;
+      conta.set(c,q);
+      if(q>qtd){ qtd=q; melhor=c; }
+    }
+    saida[i*col+j]=melhor;
   }
   return saida;
 }
@@ -537,8 +575,12 @@ async function abrirTIFF(origem){
     ? await GeoTIFF.fromUrl(origem)      // lê por faixas de bytes, sem baixar o arquivo
     : await GeoTIFF.fromBlob(origem);    // lê por pedaços, direto do disco
   const img = await tif.getImage();
-  const [x0, y0] = img.getOrigin();
-  const [rx, ry] = img.getResolution();
+  // Folha sem georreferência embutida faz o geotiff.js lançar exceção aqui.
+  // Não é erro: o .tfw ao lado é que carrega essa informação, e quem junta
+  // as duas coisas é o montarMosaico.
+  let x0 = NaN, y0 = NaN, rx = NaN, ry = NaN;
+  try{ [x0, y0] = img.getOrigin(); [rx, ry] = img.getResolution(); }
+  catch(e){ /* sem transformação afim no arquivo */ }
   const gk = img.getGeoKeys() || {};
   let semDado = null;
   try { semDado = img.getGDALNoData(); } catch(e){ /* sem tag de nodata */ }
@@ -549,15 +591,104 @@ async function abrirTIFF(origem){
            semDado, tiled: !!img.isTiled };
 }
 
-const LIMITE_MDE = 90e6;   // pixels que cabem confortavelmente na memória
+const LIMITE_MDE = 90e6;     // pixels que cabem confortavelmente na memória
+const ORCAMENTO_MOSAICO = 25e6;  // células do mosaico antes de decimar
 
 async function carregarPixels(info){
   if(info.lin*info.col > LIMITE_MDE) throw new Error(
     `Este MDE tem ${(info.lin*info.col/1e6).toFixed(0)} milhões de pixels, demais para `
-  + `carregar inteiro. Baixe um recorte menor do OpenTopography.`);
+  + `carregar inteiro. Baixe um recorte menor.`);
   const [dados] = await info.imagem.readRasters();
   info.dados = dados;
   return info;
+}
+
+/* --- Georreferência vinda de world file -----------------------------------
+   As folhas do SIGSC vêm acompanhadas de .tfw. Quando o .tif não traz a
+   georreferência embutida, é esse arquivo que diz onde ele fica. O .tfw
+   aponta o CENTRO do primeiro pixel, enquanto o GeoTIFF usa o CANTO, daí o
+   meio pixel de correção. */
+async function lerTFW(arquivo){
+  const linhas = (await arquivo.text()).trim().split(/\r?\n/).map(Number);
+  if(linhas.length < 6 || linhas.some(v => !isFinite(v))) return null;
+  const [celX, , , celYneg, cx, cy] = linhas;
+  return { celX:Math.abs(celX), celY:Math.abs(celYneg),
+           x0: cx - Math.abs(celX)/2, y0: cy + Math.abs(celYneg)/2 };
+}
+
+/* --- Mosaico de várias folhas ---------------------------------------------
+   Junta as folhas numa grade única. Se o conjunto não couber na memória,
+   decima por um fator inteiro e informa a resolução efetiva: é melhor avisar
+   que trabalhou a 4 m do que estourar a aba tentando 1 m. */
+async function montarMosaico(arquivos, aoProgredir){
+  const tifs = arquivos.filter(a => /\.tiff?$/i.test(a.name));
+  const tfws = new Map();
+  for(const a of arquivos)
+    if(/\.tfw$/i.test(a.name)) tfws.set(a.name.replace(/\.tfw$/i,'').toLowerCase(), a);
+  if(!tifs.length) throw new Error("Nenhum .tif entre os arquivos escolhidos.");
+
+  aoProgredir(`lendo a georreferência de ${tifs.length} folha(s)…`);
+  const folhas = [];
+  for(const arq of tifs){
+    const info = await abrirTIFF(arq);
+    if(!info.epsg || !isFinite(info.x0) || !info.celX){
+      const mundo = tfws.get(arq.name.replace(/\.tiff?$/i,'').toLowerCase());
+      if(mundo){
+        const g = await lerTFW(mundo);
+        if(g) Object.assign(info, g, {cel:g.celX});
+      }
+    }
+    if(!isFinite(info.x0) || !info.celX) throw new Error(
+      `${arq.name} não tem georreferência, e não achei o .tfw correspondente. `
+    + `Selecione os .tfw junto com os .tif.`);
+    info.nome = arq.name;
+    folhas.push(info);
+  }
+
+  const cel = folhas[0].celX;
+  for(const f of folhas){
+    if(Math.abs(f.celX-cel) > 1e-6 || Math.abs(f.celY-cel) > 1e-6) throw new Error(
+      `${f.nome} tem célula de ${f.celX} m, diferente de ${cel} m das outras. `
+    + `Use folhas da mesma resolução.`);
+    const ref = (folhas.find(g => g.epsg > 0) || {}).epsg;
+    if(f.epsg && ref && f.epsg !== ref) throw new Error(
+      `${f.nome} está em EPSG:${f.epsg} e outra folha em EPSG:${ref}.`);
+  }
+
+  let xmin=Infinity, ymax=-Infinity, xmax=-Infinity, ymin=Infinity;
+  for(const f of folhas){
+    xmin=Math.min(xmin, f.x0);               xmax=Math.max(xmax, f.x0+f.col*cel);
+    ymax=Math.max(ymax, f.y0);               ymin=Math.min(ymin, f.y0-f.lin*cel);
+  }
+
+  let fator = 1;
+  while(((xmax-xmin)/(cel*fator))*((ymax-ymin)/(cel*fator)) > ORCAMENTO_MOSAICO) fator++;
+  const celM = cel*fator;
+  const col = Math.round((xmax-xmin)/celM), lin = Math.round((ymax-ymin)/celM);
+
+  const dados = new Float32Array(lin*col).fill(NaN);
+  let n = 0;
+  for(const f of folhas){
+    aoProgredir(`montando o mosaico… folha ${++n} de ${folhas.length}`);
+    await respirar();
+    const lf = Math.max(1, Math.round(f.lin/fator)), cf = Math.max(1, Math.round(f.col/fator));
+    const [bloco] = await f.imagem.readRasters(
+      fator > 1 ? {width:cf, height:lf, resampleMethod:'bilinear'} : {});
+    const dj = Math.round((f.x0-xmin)/celM), di = Math.round((ymax-f.y0)/celM);
+    const sd = f.semDado;
+    for(let i=0;i<lf;i++){
+      const li = di+i; if(li<0||li>=lin) continue;
+      for(let j=0;j<cf;j++){
+        const lj = dj+j; if(lj<0||lj>=col) continue;
+        const z = bloco[i*cf+j];
+        if(isFinite(z) && z > -1e4 && (sd===null || z!==sd)) dados[li*col+lj] = z;
+      }
+    }
+  }
+
+  return { dados, lin, col, x0:xmin, y0:ymax, celX:celM, celY:celM, cel:celM,
+           epsg: (folhas.find(f => f.epsg > 0) || {}).epsg || 0,
+           semDado:null, nativa:cel, fator, folhas:folhas.length };
 }
 
 /* Lê apenas o retângulo do uso do solo que cobre a grade de saída, com uma
@@ -623,7 +754,7 @@ function ligarSolta(idZona, idInput, chave, rotulo, aoCarregar){
   campo.onchange = () => aceitar(campo.files[0]);
   zona.ondragover = ev => { ev.preventDefault(); zona.classList.add('sobre'); };
   zona.ondragleave = () => zona.classList.remove('sobre');
-  zona.ondrop = ev => { ev.preventDefault(); zona.classList.remove('sobre'); aceitar(ev.dataTransfer.files[0]); };
+  zona.ondrop = ev => { ev.preventDefault(); zona.classList.remove('sobre'); aceitar(ev.dataTransfer.files); };
 }
 const atualizarBotao = () => { $('bt-processar').disabled = !(st.mde && st.uso && st.alvo); };
 
@@ -724,12 +855,18 @@ function definirAlvo(){
   }
 
   // CRS de saída: o do próprio MDE, se já for métrico; senão UTM pelo centro
+  // Quando nenhuma folha traz o CRS (comum quando a georreferência vem só do
+  // .tfw, que não guarda essa informação), quem diz é o usuário.
+  const semCRS = !m.epsg;
+  $('lb-crs').hidden = !semCRS;
+  const epsgEfetivo = semCRS ? +$('c-crs').value : m.epsg;
+
   try{
-    if(m.epsg && !ehGeografico(m.epsg)){
-      st.p4Alvo = proj4De(m.epsg);
-      st.epsgAlvo = m.epsg;
+    if(epsgEfetivo && !ehGeografico(epsgEfetivo)){
+      st.p4Alvo = proj4De(epsgEfetivo);
+      st.epsgAlvo = epsgEfetivo;
       if(!st.p4Alvo) throw new Error(
-        `Não reconheço o EPSG:${m.epsg} do MDE. Reprojete para EPSG:31982 antes.`);
+        `Não reconheço o EPSG:${epsgEfetivo} do MDE. Reprojete para EPSG:31982 antes.`);
     }else{
       const lonC = m.x0 + ((r.j0+r.j1)/2)*m.celX;
       const zona = zonaUTM(lonC);
@@ -745,7 +882,7 @@ function definirAlvo(){
     $('resumo').textContent = ''; atualizarBotao(); return;
   }
 
-  const paraAlvo = ehGeografico(m.epsg)
+  const paraAlvo = ehGeografico(epsgEfetivo)
     ? (x,y) => proj4('EPSG:4326', st.p4Alvo, [x,y])
     : (x,y) => [x,y];
 
@@ -796,10 +933,10 @@ $('bt-processar').onclick = async () => {
     if(n > 12e6) throw new Error(`${nBR(n)} células é demais para o navegador. Recorte menor.`);
 
     log(`grade de saída: ${alvo.lin} × ${alvo.col} de ${alvo.cel} m · EPSG:${st.epsgAlvo}`);
-    if(ehGeografico(mde.epsg)) log('  reprojetando o MDE de graus para metros…');
+    if(ehGeografico(mde.epsg || st.epsgAlvo)) log('  reprojetando o MDE de graus para metros…');
     await respirar();
 
-    const paraOrigem = ehGeografico(mde.epsg)
+    const paraOrigem = ehGeografico(mde.epsg || st.epsgAlvo)
       ? (x,y) => proj4(p4Alvo, 'EPSG:4326', [x,y]) : (x,y) => [x,y];
     const z = reamostrarMDE(mde, alvo, paraOrigem, mde.semDado);
 
