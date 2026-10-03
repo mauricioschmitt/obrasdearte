@@ -115,6 +115,12 @@ a{color:var(--agua)}
     <button id="bt-ruas" aria-pressed="false" style="margin-left:.5rem">Ruas</button>
     <button id="bt-ajustar" style="margin-left:.5rem">Ajustar</button>
   </div>
+  <label style="font-size:.74rem;color:#8FB0A8;display:flex;align-items:center;gap:.35rem">Ancoragem
+    <select id="c-ancora" style="background:rgba(232,234,228,.08);color:#E8EAE4;border:1px solid rgba(232,234,228,.28);padding:.2rem .3rem;font-size:.74rem;border-radius:2px;font-family:var(--sans)">
+      <option value="0">exata, onde eu clicar</option>
+      <option value="2">até 2 células</option>
+      <option value="5" selected>até 5 células</option>
+    </select></label>
 </header>
 
 <main>
@@ -710,6 +716,18 @@ function desenhar(){
   }
   ctx.stroke();
 
+  if(bacia.caminho && bacia.caminho.length>1){
+    ctx.beginPath();
+    ctx.lineWidth=Math.max(2, vista.esc*0.35);
+    ctx.strokeStyle='#B0492B'; ctx.lineJoin='round';
+    bacia.caminho.forEach((k,n)=>{
+      const ci=(k/G.col)|0, cj=k%G.col;
+      const x=vista.ox+(cj+0.5)*vista.esc, y=vista.oy+(ci+0.5)*vista.esc;
+      n ? ctx.lineTo(x,y) : ctx.moveTo(x,y);
+    });
+    ctx.stroke();
+  }
+
   const i=(exutorio/G.col)|0, j=exutorio%G.col;
   ctx.beginPath();
   ctx.arc(vista.ox+(j+0.5)*vista.esc, vista.oy+(i+0.5)*vista.esc, Math.max(4,vista.esc*0.7),0,6.284);
@@ -728,7 +746,7 @@ function legenda(falhou){
   el.innerHTML = credito + (camada==='uso'
     ? Object.values(CLASSES).map(c=>`<div><i style="background:${c.cor}"></i>${c.nome}</div>`).join('')
     : `<div><i style="background:#1F6E8C"></i>Drenagem</div>
-       <div><i style="background:#B0492B"></i>Exutório</div>
+       <div><i style="background:#B0492B"></i>Exutório e caminho de jusante</div>
        <div style="margin-top:.3rem;color:#5C7169">Sombreado do MDE · célula ${G.cel} m</div>`);
 }
 
@@ -756,9 +774,22 @@ function calcular(){
 
   const disp = ["kirpich","dooge","corps","scs"].map(f=>Math.max(tempoConcentracao(e,f),5));
 
+  const urbano = (e.comp.find(x=>x.u===7)||{pct:0}).pct;
+  const accEx  = G.acc[exutorio];
+
   const av=[];
+  /* Diagnóstico do terreno antes de qualquer crítica ao número: se o MDE não
+     representa a drenagem no ponto, nenhum resultado abaixo vale. */
+  if(urbano >= 25 && G.cel >= 20) av.push(
+    `${urbano.toFixed(0)}% da bacia é área urbanizada e a célula do MDE tem ${G.cel} m. `
+  + `Nessa escala o modelo não enxerga meio-fio, telhado nem galeria, que são o que `
+  + `conduz a água na cidade. Confira o caminho de jusante no mapa: se ele não desce `
+  + `pelo curso d'água real, refaça a região com MDT fino.`);
+  if(accEx < 30) av.push(
+    `Só ${accEx.toFixed(0)} células drenam para este ponto. Ou ele está perto de um `
+  + `divisor de águas, ou o clique caiu fora do talvegue.`);
   if(e.nCel<100) av.push(`Bacia com ${e.nCel} células. Abaixo de ~100 o contorno é dominado pelo tamanho do pixel.`);
-  if(bacia.desloc>5*G.cel) av.push(`O exutório foi movido ${bacia.desloc.toFixed(0)} m até a drenagem. Confira se é o curso d'água pretendido.`);
+  if(bacia.desloc>5*G.cel) av.push(`O exutório foi movido ${bacia.desloc.toFixed(0)} m até a drenagem. Troque a ancoragem para "exata" se quiser o ponto onde clicou.`);
   if(!usaRacional) av.push(`Área de ${e.area_km2.toFixed(1)} km² acima da faixa do método racional (2 km²; o DNIT admite 4). Adotado SCS.`);
   if(Tc<10) av.push(`Tc de ${Tc.toFixed(0)} min abaixo da faixa de validade da maioria das curvas IDF. Piso de 5 min aplicado.`);
   if(H.cr<0.10 && H.P>0) av.push(`A abstração inicial consome ${H.Ia.toFixed(0)} dos ${H.P.toFixed(0)} mm da chuva e só ${(H.cr*100).toFixed(0)}% escoa. Com CN baixo e chuva curta, λ = 0,20 praticamente zera o escoamento. Teste λ = 0,05.`);
@@ -769,6 +800,17 @@ function calcular(){
   $('painel').innerHTML=`
     <div class="q"><b>${Q.toFixed(Q<10?2:1)}</b><span>m³/s</span></div>
     <div class="q-sub">${metodo} · TR ${estado.TR} anos · bacia de ${e.area_km2.toFixed(2)} km²</div>
+
+    <section><h2>Verifique antes de confiar</h2>
+      <table>
+        <tr><td>Células que drenam para o ponto</td><td>${accEx.toLocaleString('pt-BR')}</td></tr>
+        <tr><td>Deslocamento do clique</td><td>${bacia.desloc.toFixed(0)} m</td></tr>
+        <tr><td>Área urbanizada na bacia</td><td>${urbano.toFixed(0)} %</td></tr>
+        <tr><td>Resolução do MDE</td><td>${G.cel} m</td></tr>
+      </table>
+      <p class="nota">A linha vermelha no mapa mostra por onde o modelo acha que a água
+      desce a partir do ponto. Se ela não segue o curso d'água real, o resultado abaixo
+      não vale para este local.</p></section>
 
     <section><h2>Obra de arte sugerida</h2>
       <table>
@@ -971,16 +1013,31 @@ tela.addEventListener('pointercancel', ev => {
   tela.style.cursor = 'crosshair';
 });
 
+/* Segue o fluxo a partir do exutório até sair do recorte. É a verificação
+   mais direta que existe: se a linha não desce pelo curso d'água que você
+   conhece, o MDE não representa a drenagem ali e nenhum número vale. */
+function caminhoJusante(k, limite=4000){
+  const c=[k]; let atual=k;
+  for(let n=0;n<limite;n++){
+    const r=G.receptor[atual];
+    if(r<0) break;
+    c.push(r); atual=r;
+  }
+  return c;
+}
+
 function delimitarEm(px, py){
   const j = Math.floor((px-vista.ox)/vista.esc);
   const i = Math.floor((py-vista.oy)/vista.esc);
   if(i<0||j<0||i>=G.lin||j>=G.col) return;
-  // Com zoom grande o usuário mira o pixel certo, então a ancoragem não
-  // precisa procurar tão longe e deixa de roubar o clique para outro canal.
-  const raio = vista.esc > escBase*6 ? 2 : 5;
-  const [ai,aj] = ancorar(i, j, raio);
+  // Em obra de arte o técnico sabe onde a estrutura fica, e o canal que o MDE
+  // enxerga pode estar deslocado. Por isso a ancoragem é escolha dele: em
+  // "exata" o exutório é a célula clicada, sem correção nenhuma.
+  const raio = +$('c-ancora').value;
+  const [ai,aj] = raio > 0 ? ancorar(i, j, raio) : [i, j];
   exutorio = ai*G.col+aj;
-  bacia = {celulas:delimitar(exutorio), desloc:G.cel*Math.hypot(ai-i, aj-j)};
+  bacia = { celulas:delimitar(exutorio), desloc:G.cel*Math.hypot(ai-i, aj-j),
+            caminho:caminhoJusante(exutorio) };
   pintarBase(); desenhar(); calcular();
 }
 
