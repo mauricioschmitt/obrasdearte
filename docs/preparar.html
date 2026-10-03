@@ -681,6 +681,35 @@ async function lerTFW(arquivo){
 }
 
 /* Só lê cabeçalhos: descobre onde cada folha fica, sem tocar nos pixels. */
+/* Nem todo MDT declara o valor de vazio. As folhas do SIGSC, por exemplo,
+   usam 0 para buraco sem dizer isso em lugar nenhum: num terreno a 800 m,
+   esses zeros virariam depressões de 800 m de profundidade, o preenchimento
+   as encheria e a drenagem sairia inventada ao redor.
+
+   A detecção é por lacuna: se existe um valor repetido muito abaixo de todo
+   o resto, ele é marcador, não relevo. */
+async function detectarVazio(f){
+  const amostras = [];
+  const linhas = Math.min(12, f.lin);
+  for(let k=0;k<linhas;k++){
+    const v = Math.floor(f.lin*(k+0.5)/linhas);
+    const [linha] = await f.imagem.readRasters({window:[0, v, f.col, v+1]});
+    for(let i=0;i<linha.length;i+=7) amostras.push(linha[i]);
+  }
+  const finitos = amostras.filter(z => isFinite(z));
+  if(finitos.length < 50) return null;
+
+  for(const c of [0, -9999, -32767, -32768, -3.4028234663852886e38]){
+    let qtd = 0, minReal = Infinity;
+    for(const z of finitos){
+      if(z === c) qtd++;
+      else if(z < minReal) minReal = z;
+    }
+    if(qtd && isFinite(minReal) && minReal - c > 50) return c;
+  }
+  return null;
+}
+
 async function indexarFolhas(arquivos, relato){
   const tifs = arquivos.filter(a => /\.tiff?$/i.test(a.name));
   const tfws = new Map();
@@ -704,6 +733,11 @@ async function indexarFolhas(arquivos, relato){
       `${arq.name} não tem georreferência e não achei o .tfw correspondente. `
     + `Selecione os .tfw junto com os .tif.`);
     info.nome = arq.name;
+    if(info.semDado === null || info.semDado === undefined){
+      relato(`procurando o valor de vazio em ${arq.name}…`);
+      info.semDado = await detectarVazio(info);
+      info.vazioDetectado = info.semDado !== null;
+    }
     folhas.push(info);
   }
 
@@ -722,7 +756,9 @@ async function indexarFolhas(arquivos, relato){
     y0=Math.max(y0,f.y0);  y1=Math.min(y1,f.y0-f.lin*cel);
   }
   const total = folhas.reduce((s,f)=>s+f.lin*f.col, 0);
+  const vazio = folhas.find(f => f.vazioDetectado);
   return { folhas, cel, epsg:ref, x0, y0, x1, y1, total,
+           vazio: vazio ? vazio.semDado : null,
            lin:Math.round((y0-y1)/cel), col:Math.round((x1-x0)/cel) };
 }
 
@@ -869,6 +905,10 @@ function ligarSolta(idZona, idInput, chave, rotulo, aoCarregar){
           + `${info.indice.folhas.length} folha(s), ${(info.indice.total/1e6).toFixed(0)} `
           + `milhões de pixels a ${info.nativa} m. As folhas não são carregadas inteiras: `
           + `a prévia é grossa e o processamento lê em faixas, direto para a grade de saída.`
+          + (info.indice.vazio !== null && info.indice.vazio !== undefined
+             ? `<br><b>Valor ${info.indice.vazio} detectado como vazio</b> e descartado. `
+             + `O arquivo não declarava isso; sem tratar, esses pontos virariam depressões `
+             + `fundas e inventariam drenagem em volta.` : '')
           + `</span>` : '';
       zona.innerHTML = `<b>${rotulo} carregado</b><span>`
         + `${st[chave === 'mde' ? 'arqMde' : 'arqUso'].name} · ${info.lin} × ${info.col}`
