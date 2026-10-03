@@ -88,9 +88,10 @@ Não precisa de QGIS, de Python nem de servidor, e nada sai do seu computador.</
 
 <div class="passo">
   <h2><em>1</em>Modelo de elevação</h2>
-  <p>GeoTIFF de qualquer fonte. Pode estar em graus, que a página reprojeta sozinha para
-  UTM. E pode ser mais de um arquivo: selecione todas as folhas do SIGSC de uma vez e ela
-  monta o mosaico. Se as folhas vierem com .tfw, selecione-os junto.</p>
+  <p>GeoTIFF de qualquer fonte. Pode estar em graus, que a página reprojeta sozinha para UTM.
+  E pode ser mais de um arquivo: selecione todas as folhas do SIGSC de uma vez, junto com os
+  .tfw se houver. As folhas não são carregadas inteiras — são lidas em faixas, direto para a
+  grade de saída, então o tamanho delas não é mais limite.</p>
   <div class="solta" id="solta-mde" tabindex="0" role="button">
     <b>Solte o MDE aqui</b><span>uma ou várias folhas · .tif, com os .tfw junto se houver</span>
   </div>
@@ -616,22 +617,38 @@ async function lerTFW(arquivo){
            x0: cx - Math.abs(celX)/2, y0: cy + Math.abs(celYneg)/2 };
 }
 
-/* --- Mosaico de várias folhas ---------------------------------------------
-   Junta as folhas numa grade única. Se o conjunto não couber na memória,
-   decima por um fator inteiro e informa a resolução efetiva: é melhor avisar
-   que trabalhou a 4 m do que estourar a aba tentando 1 m. */
-async function montarMosaico(arquivos, aoProgredir){
+/* --- Folhas lidas em faixas ------------------------------------------------
+   Uma folha do SIGSC a 1 m tem dezenas de milhões de pixels. Montar o mosaico
+   inteiro na memória antes de recortar estoura a aba.
+
+   A saída aqui é nunca ter o mosaico completo: as folhas ficam só indexadas,
+   e cada uma é lida em faixas horizontais, escrevendo direto na grade final.
+   O consumo passa a depender do tamanho da SAÍDA, não do tamanho da entrada.
+   --------------------------------------------------------------------------- */
+const AMOSTRAS_POR_LEITURA = 4e6;   // teto de pixels por faixa lida
+
+async function lerTFW(arquivo){
+  const linhas = (await arquivo.text()).trim().split(/\r?\n/).map(Number);
+  if(linhas.length < 6 || linhas.some(v => !isFinite(v))) return null;
+  const [celX, , , celYneg, cx, cy] = linhas;
+  return { celX:Math.abs(celX), celY:Math.abs(celYneg),
+           x0: cx - Math.abs(celX)/2, y0: cy + Math.abs(celYneg)/2 };
+}
+
+/* Só lê cabeçalhos: descobre onde cada folha fica, sem tocar nos pixels. */
+async function indexarFolhas(arquivos, relato){
   const tifs = arquivos.filter(a => /\.tiff?$/i.test(a.name));
   const tfws = new Map();
   for(const a of arquivos)
     if(/\.tfw$/i.test(a.name)) tfws.set(a.name.replace(/\.tfw$/i,'').toLowerCase(), a);
   if(!tifs.length) throw new Error("Nenhum .tif entre os arquivos escolhidos.");
 
-  aoProgredir(`lendo a georreferência de ${tifs.length} folha(s)…`);
   const folhas = [];
   for(const arq of tifs){
+    relato(`lendo a georreferência… ${folhas.length+1} de ${tifs.length}`);
+    await respirar();
     const info = await abrirTIFF(arq);
-    if(!info.epsg || !isFinite(info.x0) || !info.celX){
+    if(!isFinite(info.x0) || !info.celX){
       const mundo = tfws.get(arq.name.replace(/\.tiff?$/i,'').toLowerCase());
       if(mundo){
         const g = await lerTFW(mundo);
@@ -639,56 +656,110 @@ async function montarMosaico(arquivos, aoProgredir){
       }
     }
     if(!isFinite(info.x0) || !info.celX) throw new Error(
-      `${arq.name} não tem georreferência, e não achei o .tfw correspondente. `
+      `${arq.name} não tem georreferência e não achei o .tfw correspondente. `
     + `Selecione os .tfw junto com os .tif.`);
     info.nome = arq.name;
     folhas.push(info);
   }
 
   const cel = folhas[0].celX;
+  const ref = (folhas.find(f => f.epsg > 0) || {}).epsg || 0;
   for(const f of folhas){
     if(Math.abs(f.celX-cel) > 1e-6 || Math.abs(f.celY-cel) > 1e-6) throw new Error(
-      `${f.nome} tem célula de ${f.celX} m, diferente de ${cel} m das outras. `
-    + `Use folhas da mesma resolução.`);
-    const ref = (folhas.find(g => g.epsg > 0) || {}).epsg;
+      `${f.nome} tem célula de ${f.celX} m, diferente de ${cel} m das outras.`);
     if(f.epsg && ref && f.epsg !== ref) throw new Error(
       `${f.nome} está em EPSG:${f.epsg} e outra folha em EPSG:${ref}.`);
   }
 
-  let xmin=Infinity, ymax=-Infinity, xmax=-Infinity, ymin=Infinity;
+  let x0=Infinity, y0=-Infinity, x1=-Infinity, y1=Infinity;
   for(const f of folhas){
-    xmin=Math.min(xmin, f.x0);               xmax=Math.max(xmax, f.x0+f.col*cel);
-    ymax=Math.max(ymax, f.y0);               ymin=Math.min(ymin, f.y0-f.lin*cel);
+    x0=Math.min(x0,f.x0);  x1=Math.max(x1,f.x0+f.col*cel);
+    y0=Math.max(y0,f.y0);  y1=Math.min(y1,f.y0-f.lin*cel);
   }
+  const total = folhas.reduce((s,f)=>s+f.lin*f.col, 0);
+  return { folhas, cel, epsg:ref, x0, y0, x1, y1, total,
+           lin:Math.round((y0-y1)/cel), col:Math.round((x1-x0)/cel) };
+}
 
-  let fator = 1;
-  while(((xmax-xmin)/(cel*fator))*((ymax-ymin)/(cel*fator)) > ORCAMENTO_MOSAICO) fator++;
-  const celM = cel*fator;
-  const col = Math.round((xmax-xmin)/celM), lin = Math.round((ymax-ymin)/celM);
+/* Lê uma folha em faixas e acumula média na grade de saída. Média, e não
+   vizinho mais próximo, porque reduzir de 1 m para 2 ou 3 m é agregação:
+   usar todos os pixels do pedaço é mais fiel e tira o ruído do MDT. */
+async function acumularFolha(f, alvo, soma, conta, relato, rotulo, passo){
+  const { x0, y0, cel } = alvo;
+  const jIni = Math.max(0, Math.floor((f.x0 - x0)/cel));
+  const jFim = Math.min(alvo.col, Math.ceil((f.x0 + f.col*f.celX - x0)/cel));
+  const iIni = Math.max(0, Math.floor((y0 - f.y0)/cel));
+  const iFim = Math.min(alvo.lin, Math.ceil((y0 - (f.y0 - f.lin*f.celY))/cel));
+  if(jFim <= jIni || iFim <= iIni) return 0;
 
-  const dados = new Float32Array(lin*col).fill(NaN);
-  let n = 0;
-  for(const f of folhas){
-    aoProgredir(`montando o mosaico… folha ${++n} de ${folhas.length}`);
+  const porCelula = Math.max(1, Math.round(cel/f.celX));
+  const linhasPorFaixa = Math.max(1,
+    Math.floor(AMOSTRAS_POR_LEITURA/(f.col*porCelula)));
+  passo = Math.max(1, Math.min(passo, porCelula));
+  const sd = f.semDado;
+  let usadas = 0;
+
+  for(let iA = iIni; iA < iFim; iA += linhasPorFaixa){
+    const iB = Math.min(iFim, iA + linhasPorFaixa);
+    relato(`${rotulo} · linha ${iA-iIni} de ${iFim-iIni}`);
     await respirar();
-    const lf = Math.max(1, Math.round(f.lin/fator)), cf = Math.max(1, Math.round(f.col/fator));
-    const [bloco] = await f.imagem.readRasters(
-      fator > 1 ? {width:cf, height:lf, resampleMethod:'bilinear'} : {});
-    const dj = Math.round((f.x0-xmin)/celM), di = Math.round((ymax-f.y0)/celM);
-    const sd = f.semDado;
-    for(let i=0;i<lf;i++){
-      const li = di+i; if(li<0||li>=lin) continue;
-      for(let j=0;j<cf;j++){
-        const lj = dj+j; if(lj<0||lj>=col) continue;
-        const z = bloco[i*cf+j];
-        if(isFinite(z) && z > -1e4 && (sd===null || z!==sd)) dados[li*col+lj] = z;
+
+    // intervalo de pixels nativos que cobre esta faixa de linhas de saída
+    const vTopo = Math.max(0, Math.floor((y0 - iB*cel - (f.y0 - f.lin*f.celY))/f.celY));
+    const v0 = Math.max(0, Math.floor((f.y0 - (y0 - iA*cel))/f.celY));
+    const v1 = Math.min(f.lin, Math.ceil((f.y0 - (y0 - iB*cel))/f.celY));
+    if(v1 <= v0) continue;
+
+    const [bloco] = await f.imagem.readRasters({window:[0, v0, f.col, v1]});
+    const alt = v1 - v0;
+
+    for(let v = 0; v < alt; v += passo){
+      const yPix = f.y0 - (v0 + v + 0.5)*f.celY;
+      const i = Math.floor((y0 - yPix)/cel);
+      if(i < iA || i >= iB) continue;
+      for(let u = 0; u < f.col; u += passo){
+        const z = bloco[v*f.col + u];
+        if(!isFinite(z) || z <= -1e4 || (sd !== null && z === sd)) continue;
+        const xPix = f.x0 + (u + 0.5)*f.celX;
+        const j = Math.floor((xPix - x0)/cel);
+        if(j < 0 || j >= alvo.col) continue;
+        const k = i*alvo.col + j;
+        soma[k] += z; conta[k]++; usadas++;
       }
     }
   }
+  return usadas;
+}
 
-  return { dados, lin, col, x0:xmin, y0:ymax, celX:celM, celY:celM, cel:celM,
-           epsg: (folhas.find(f => f.epsg > 0) || {}).epsg || 0,
-           semDado:null, nativa:cel, fator, folhas:folhas.length };
+/* Monta a grade de saída a partir das folhas, sem mosaico intermediário. */
+async function gradeDeFolhas(idx, alvo, relato){
+  const n = alvo.lin*alvo.col;
+  const soma = new Float64Array(n), conta = new Uint16Array(n);
+  /* Quando a saída é muito mais grossa que a folha, percorrer pixel a pixel
+     gasta tempo sem melhorar nada: amostra-se com passo, mantendo pelo menos
+     umas quatro amostras por célula de saída. */
+  const passo = Math.max(1, Math.floor(alvo.cel/idx.cel/2));
+  let f = 0;
+  for(const folha of idx.folhas){
+    f++;
+    await acumularFolha(folha, alvo, soma, conta, relato,
+                        `folha ${f} de ${idx.folhas.length}`, passo);
+  }
+  const z = new Float32Array(n);
+  for(let k = 0; k < n; k++) z[k] = conta[k] ? soma[k]/conta[k] : NaN;
+  return z;
+}
+
+/* Prévia: a mesma leitura em faixas, numa grade grossa só para a tela. */
+async function mosaicoPreview(idx, relato, larguraAlvo = 1000){
+  const cel = Math.max(idx.cel, (idx.x1-idx.x0)/larguraAlvo, (idx.y0-idx.y1)/larguraAlvo);
+  const alvo = { x0:idx.x0, y0:idx.y0, cel,
+                 col:Math.max(1, Math.round((idx.x1-idx.x0)/cel)),
+                 lin:Math.max(1, Math.round((idx.y0-idx.y1)/cel)) };
+  const dados = await gradeDeFolhas(idx, alvo, relato);
+  return { dados, lin:alvo.lin, col:alvo.col, x0:alvo.x0, y0:alvo.y0,
+           celX:cel, celY:cel, cel, epsg:idx.epsg, semDado:null,
+           nativa:idx.cel, folhas:idx.folhas.length, indice:idx };
 }
 
 /* Lê apenas o retângulo do uso do solo que cobre a grade de saída, com uma
@@ -718,25 +789,46 @@ async function lerJanelaUso(uso, alvo, paraUso){
 /* --- áreas de soltar ------------------------------------------------------ */
 function ligarSolta(idZona, idInput, chave, rotulo, aoCarregar){
   const zona = $(idZona), campo = $(idInput);
-  const aceitar = async arq => {
-    if(!arq) return;
-    if(!/\.tiff?$/i.test(arq.name)){
-      zona.innerHTML = `<b style="color:var(--alerta)">Não é um GeoTIFF</b>
-        <span>"${arq.name}" — esperado .tif</span>`;
+  const aceitar = async entrada => {
+    const lista = Array.from(entrada && entrada.length !== undefined ? entrada : [entrada])
+                       .filter(Boolean);
+    const tifs = lista.filter(a => /\.tiff?$/i.test(a.name));
+    if(!tifs.length){
+      zona.innerHTML = `<b style="color:var(--alerta)">Nenhum GeoTIFF</b>
+        <span>esperado .tif — os .tfw podem vir selecionados junto</span>`;
       return;
     }
-    zona.innerHTML = `<b>Lendo ${arq.name}…</b><span>${(arq.size/1e6).toFixed(1)} MB</span>`;
+    const relato = t => { zona.innerHTML = `<b>Preparando…</b><span>${t}</span>`; };
+    relato(`${tifs.length} arquivo(s)`);
     await respirar();
     try{
-      let info = await abrirTIFF(arq);
-      if(chave === 'mde') info = await carregarPixels(info);
+      let info;
+      if(chave === 'mde'){
+        const idx = await indexarFolhas(lista, relato);
+        st.indice = idx;
+        relato(`${idx.folhas.length} folha(s) · ${(idx.total/1e6).toFixed(0)} milhões de pixels `
+             + `a ${idx.cel} m · montando a prévia…`);
+        info = await mosaicoPreview(idx, relato);
+      }else{
+        info = await abrirTIFF(tifs[0]);
+      }
       st[chave] = info;
-      st[chave === 'mde' ? 'arqMde' : 'arqUso'] = arq;
+      st[chave === 'mde' ? 'arqMde' : 'arqUso'] =
+        { name: tifs.length > 1 ? `${tifs.length} folhas` : tifs[0].name };
+
       zona.classList.add('pronto');
       const gp = info.lin*info.col >= 1e8
         ? ` · ${(info.lin*info.col/1e9).toFixed(1)} bilhões de pixels, lendo só a janela` : '';
-      zona.innerHTML = `<b>${rotulo} carregado</b><span>${arq.name} · ${info.lin} × ${info.col}`
-                     + ` · EPSG:${info.epsg || '?'}${gp} · clique para trocar</span>`;
+      const extra = info.indice
+        ? `<span style="color:var(--fraca);display:block;margin-top:.3rem">`
+          + `${info.indice.folhas.length} folha(s), ${(info.indice.total/1e6).toFixed(0)} `
+          + `milhões de pixels a ${info.nativa} m. As folhas não são carregadas inteiras: `
+          + `a prévia é grossa e o processamento lê em faixas, direto para a grade de saída.`
+          + `</span>` : '';
+      zona.innerHTML = `<b>${rotulo} carregado</b><span>`
+        + `${st[chave === 'mde' ? 'arqMde' : 'arqUso'].name} · ${info.lin} × ${info.col}`
+        + ` a ${info.cel} m · EPSG:${info.epsg || '?'}${gp} · clique para trocar</span>${extra}`;
+
       if(chave === 'uso' && !info.tiled && info.lin*info.col > 5e7)
         zona.innerHTML += `<span style="color:var(--alerta);display:block;margin-top:.3rem">`
           + `Este arquivo não é tiled, então ler uma janela dele será lento. `
@@ -751,7 +843,7 @@ function ligarSolta(idZona, idInput, chave, rotulo, aoCarregar){
   if(chave === 'mde') receberMDE = aceitar;
   zona.onclick = () => campo.click();
   zona.onkeydown = ev => { if(ev.key === 'Enter' || ev.key === ' '){ ev.preventDefault(); campo.click(); } };
-  campo.onchange = () => aceitar(campo.files[0]);
+  campo.onchange = () => aceitar(campo.files);
   zona.ondragover = ev => { ev.preventDefault(); zona.classList.add('sobre'); };
   zona.ondragleave = () => zona.classList.remove('sobre');
   zona.ondrop = ev => { ev.preventDefault(); zona.classList.remove('sobre'); aceitar(ev.dataTransfer.files); };
@@ -914,6 +1006,8 @@ $('c-celula').oninput = () => { if(st.rect) definirAlvo(); };
 let receberMDE = null;   // definido por ligarSolta, reusado pela busca na API
 ligarSolta('solta-mde', 'arq-mde', 'mde', 'MDE', info => {
   st.rect = { i0:0, j0:0, i1:info.lin, j1:info.col };
+  if(info.nativa && info.nativa < 10)
+    $('c-celula').value = Math.max(1, Math.round(info.nativa*2));
   desenharPrevia(); ligarArrasto(); definirAlvo();
 });
 ligarSolta('solta-uso', 'arq-uso', 'uso', 'MapBiomas');
@@ -936,9 +1030,19 @@ $('bt-processar').onclick = async () => {
     if(ehGeografico(mde.epsg || st.epsgAlvo)) log('  reprojetando o MDE de graus para metros…');
     await respirar();
 
-    const paraOrigem = ehGeografico(mde.epsg || st.epsgAlvo)
-      ? (x,y) => proj4(p4Alvo, 'EPSG:4326', [x,y]) : (x,y) => [x,y];
-    const z = reamostrarMDE(mde, alvo, paraOrigem, mde.semDado);
+    let z;
+    if(st.indice && (st.indice.epsg || st.epsgAlvo) === st.epsgAlvo){
+      // Caminho das folhas: lê na resolução original, em faixas, escrevendo
+      // direto na grade de saída. Não passa pela prévia grossa e nunca tem o
+      // mosaico inteiro na memória.
+      log(`  lendo ${st.indice.folhas.length} folha(s) em faixas, a ${st.indice.cel} m…`);
+      await respirar();
+      z = await gradeDeFolhas(st.indice, alvo, t => log(`  ${t}`));
+    }else{
+      const paraOrigem = ehGeografico(mde.epsg || st.epsgAlvo)
+        ? (x,y) => proj4(p4Alvo, 'EPSG:4326', [x,y]) : (x,y) => [x,y];
+      z = reamostrarMDE(mde, alvo, paraOrigem, mde.semDado);
+    }
 
     const mascara = new Uint8Array(n);
     let validas = 0;
